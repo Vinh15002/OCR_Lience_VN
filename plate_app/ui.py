@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import math
 import threading
+import time
 import uuid
 from pathlib import Path
 from queue import Empty, Queue
@@ -13,7 +14,13 @@ import cv2
 from PIL import Image, ImageTk
 
 from .config import AppConfig, CameraConfig, load_config, save_config
-from .recognition import MultiCameraProcessor, ProcessedFrame, ProcessorStatus
+from .recognition import (
+    Detection,
+    MultiCameraProcessor,
+    ProcessedFrame,
+    ProcessorStatus,
+    is_plausible_vietnamese_plate,
+)
 from .storage import EventStore
 from .video import CameraStream
 
@@ -37,6 +44,8 @@ class PlateApp(tk.Tk):
         self.output_queue: Queue = Queue(maxsize=30)
         self.camera_labels: dict[str, ttk.Label] = {}
         self.camera_images: dict[str, ImageTk.PhotoImage] = {}
+        self._preview_sequences: dict[str, int] = {}
+        self._latest_detections: dict[str, tuple[float, tuple[Detection, ...]]] = {}
         self._streams_lock = threading.Lock()
         self._running = False
 
@@ -45,6 +54,7 @@ class PlateApp(tk.Tk):
         self._load_latest_events()
         self.protocol("WM_DELETE_WINDOW", self._on_close)
         self.after(50, self._poll_output)
+        self.after(50, self._poll_previews)
 
     def _build_ui(self) -> None:
         toolbar = ttk.Frame(self, padding=8)
@@ -211,6 +221,8 @@ class PlateApp(tk.Tk):
             child.destroy()
         self.camera_labels.clear()
         self.camera_images.clear()
+        self._preview_sequences.clear()
+        self._latest_detections.clear()
         cameras = self.app_config.cameras
         columns = 1 if len(cameras) <= 1 else 2
         for index, camera in enumerate(cameras):
@@ -254,6 +266,8 @@ class PlateApp(tk.Tk):
             messagebox.showinfo("No source", "Add at least one video or camera first.")
             return
         self._save_settings()
+        self._preview_sequences.clear()
+        self._latest_detections.clear()
         self._running = True
         for camera in self.app_config.cameras:
             if camera.enabled:
@@ -281,6 +295,8 @@ class PlateApp(tk.Tk):
             self.streams.clear()
         for _, stream in streams:
             stream.stop()
+        self._preview_sequences.clear()
+        self._latest_detections.clear()
         self.start_button.configure(state=tk.NORMAL)
         self.stop_button.configure(state=tk.DISABLED)
         self.status_var.set("Stopped")
@@ -294,29 +310,80 @@ class PlateApp(tk.Tk):
                     if item.is_error:
                         self.status_var.set(f"Error: {item.message}")
                 elif isinstance(item, ProcessedFrame):
-                    self._show_frame(item)
+                    self._latest_detections[item.camera_id] = (
+                        time.monotonic(),
+                        item.detections,
+                    )
                     for event in item.new_events:
                         self._insert_event(event, top=True)
         except Empty:
             pass
         self.after(50, self._poll_output)
 
-    def _show_frame(self, item: ProcessedFrame) -> None:
-        label = self.camera_labels.get(item.camera_id)
+    def _poll_previews(self) -> None:
+        if self._running:
+            for camera, stream in self._stream_snapshot():
+                previous = self._preview_sequences.get(camera.id, -1)
+                sequence, frame, status = stream.latest_if_new(previous)
+                if frame is None:
+                    label = self.camera_labels.get(camera.id)
+                    if label is not None and previous < 0:
+                        label.configure(text=f"{camera.name}\n{status}", image="")
+                    continue
+                self._preview_sequences[camera.id] = sequence
+                self._draw_preview_overlay(camera.id, frame)
+                self._show_frame(camera.id, frame)
+        preview_fps = max(1, int(self.app_config.preview_fps))
+        self.after(max(15, round(1000 / preview_fps)), self._poll_previews)
+
+    def _draw_preview_overlay(self, camera_id: str, frame) -> None:
+        height, width = frame.shape[:2]
+        roi_width = int(width * min(max(self.app_config.roi_width, 0.1), 1.0))
+        roi_height = int(height * min(max(self.app_config.roi_height, 0.1), 1.0))
+        x1 = (width - roi_width) // 2
+        y1 = (height - roi_height) // 2
+        x2, y2 = x1 + roi_width, y1 + roi_height
+        cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 220, 255), 2)
+        cv2.putText(frame, "ROI", (x1 + 8, y1 + 25), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 220, 255), 2)
+
+        latest = self._latest_detections.get(camera_id)
+        if latest is None:
+            return
+        detected_at, detections = latest
+        hold_seconds = max(0.75, self.app_config.detection_interval_seconds * 2.5)
+        if time.monotonic() - detected_at > hold_seconds:
+            self._latest_detections.pop(camera_id, None)
+            return
+        for detection in detections:
+            color = (0, 200, 0) if is_plausible_vietnamese_plate(detection.plate) else (0, 128, 255)
+            cv2.rectangle(frame, detection.box[:2], detection.box[2:], color, 2)
+            label = f"{detection.plate or 'PLATE'} {detection.ocr_confidence:.0%}"
+            cv2.putText(
+                frame,
+                label,
+                (detection.box[0], max(20, detection.box[1] - 8)),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.65,
+                color,
+                2,
+            )
+
+    def _show_frame(self, camera_id: str, frame) -> None:
+        label = self.camera_labels.get(camera_id)
         if label is None:
             return
         width = max(320, label.winfo_width() - 8)
         height = max(240, label.winfo_height() - 8)
-        frame_height, frame_width = item.frame.shape[:2]
+        frame_height, frame_width = frame.shape[:2]
         scale = min(width / frame_width, height / frame_height)
         resized = cv2.resize(
-            item.frame,
+            frame,
             (max(1, int(frame_width * scale)), max(1, int(frame_height * scale))),
             interpolation=cv2.INTER_AREA,
         )
         image = Image.fromarray(cv2.cvtColor(resized, cv2.COLOR_BGR2RGB))
         photo = ImageTk.PhotoImage(image=image)
-        self.camera_images[item.camera_id] = photo
+        self.camera_images[camera_id] = photo
         label.configure(image=photo, text="")
 
     def _load_latest_events(self) -> None:

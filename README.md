@@ -42,6 +42,7 @@ python app.py --source 0 --source "rtsp://user:password@192.168.1.20:554/stream"
 
 - `roi_width`, `roi_height`: tỷ lệ vùng xử lý ở chính giữa ảnh.
 - `frame_skip`: chỉ nhận diện mỗi N frame để giảm tải.
+- `preview_fps`: FPS hiển thị mục tiêu, độc lập với tốc độ nhận diện; mặc định 20 FPS.
 - `detection_interval_seconds`: khoảng nghỉ giữa hai lần detect trên cùng camera; mặc định 0,5 giây và luôn xử lý frame mới nhất.
 - `ocr_recognition_model`: mặc định dùng PP-OCRv6 tiny để CPU xử lý nhanh hơn. Biển xe máy được tự tách thành hai dòng trước khi OCR.
 - `min_votes`: số lần OCR giống nhau trước khi tạo sự kiện.
@@ -51,7 +52,7 @@ python app.py --source 0 --source "rtsp://user:password@192.168.1.20:554/stream"
 - `track_max_missed_frames`: số frame detector được phép hụt trước khi coi xe đã rời ROI.
 - `max_plates_per_frame`: số biển tối đa xử lý trong một frame.
 
-Nếu camera bị giật, tăng `frame_skip` từ 3 lên 5. Nếu xe chạy nhanh và thường không đủ hai phiếu OCR, giảm `frame_skip` hoặc tạm đặt `min_votes` bằng 1 để khảo sát, nhưng không nên dùng cấu hình một phiếu khi điều khiển barrier.
+Preview đọc trực tiếp frame mới nhất của mỗi camera nên vẫn chạy ở `preview_fps` trong khi AI xử lý nền theo `detection_interval_seconds`. Nếu máy yếu khi mở nhiều camera, giảm `preview_fps` xuống 15. Nếu xe chạy nhanh và thường không đủ hai phiếu OCR, giảm `detection_interval_seconds` hoặc tạm đặt `min_votes` bằng 1 để khảo sát, nhưng không nên dùng cấu hình một phiếu khi điều khiển barrier.
 
 ## Dữ liệu đầu ra
 

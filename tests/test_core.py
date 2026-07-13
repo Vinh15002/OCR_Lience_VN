@@ -2,6 +2,8 @@ import tempfile
 import unittest
 from pathlib import Path
 
+import numpy as np
+
 from plate_app.config import AppConfig, CameraConfig, load_config, save_config
 from plate_app.recognition import (
     ConsensusTracker,
@@ -10,6 +12,7 @@ from plate_app.recognition import (
     normalize_plate,
 )
 from plate_app.storage import EventStore
+from plate_app.video import CameraStream
 
 
 class PlateTextTests(unittest.TestCase):
@@ -53,11 +56,31 @@ class ConfigAndStorageTests(unittest.TestCase):
             loaded = load_config(path)
             self.assertEqual(loaded.cameras[0].uri, "0")
             self.assertEqual(loaded.detection_interval_seconds, 0.5)
+            self.assertEqual(loaded.preview_fps, 20)
 
     def test_empty_event_store(self):
         with tempfile.TemporaryDirectory() as directory:
             store = EventStore(Path(directory))
             self.assertEqual(store.latest(), [])
+
+
+class CameraStreamTests(unittest.TestCase):
+    def test_latest_if_new_does_not_copy_same_frame_twice(self):
+        stream = CameraStream(CameraConfig("cam-1", "Gate", "0"))
+        with stream._lock:
+            stream._frame = np.full((2, 3, 3), 7, dtype=np.uint8)
+            stream._sequence = 1
+            stream._status = "connected"
+
+        sequence, frame, status = stream.latest_if_new(0)
+        self.assertEqual((sequence, status), (1, "connected"))
+        self.assertIsNotNone(frame)
+        frame[0, 0, 0] = 99
+        self.assertEqual(stream._frame[0, 0, 0], 7)
+
+        sequence, frame, status = stream.latest_if_new(1)
+        self.assertEqual((sequence, status), (1, "connected"))
+        self.assertIsNone(frame)
 
 
 if __name__ == "__main__":

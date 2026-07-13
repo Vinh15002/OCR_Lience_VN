@@ -24,6 +24,7 @@ class AppConfig:
     ocr_confidence: float = 0.30
     ocr_recognition_model: str = "PP-OCRv6_tiny_rec"
     frame_skip: int = 3
+    preview_fps: int = 20
     detection_interval_seconds: float = 0.5
     min_votes: int = 2
     vote_window_seconds: float = 2.5

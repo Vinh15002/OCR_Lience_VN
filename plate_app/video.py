@@ -60,6 +60,13 @@ class CameraStream:
                 return self._sequence, None, self._status
             return self._sequence, self._frame.copy(), self._status
 
+    def latest_if_new(self, previous_sequence: int):
+        """Returns a copy only when capture has produced a newer frame."""
+        with self._lock:
+            if self._frame is None or self._sequence == previous_sequence:
+                return self._sequence, None, self._status
+            return self._sequence, self._frame.copy(), self._status
+
     def _set_status(self, status: str) -> None:
         with self._lock:
             self._status = status
