@@ -1,0 +1,26 @@
+{
+  "model_path": "license_plate_detector.pt",
+  "roi_width": 0.71,
+  "roi_height": 0.65,
+  "detection_confidence": 0.35,
+  "ocr_confidence": 0.3,
+  "ocr_recognition_model": "PP-OCRv6_tiny_rec",
+  "frame_skip": 3,
+  "detection_interval_seconds": 0.5,
+  "min_votes": 2,
+  "vote_window_seconds": 2.5,
+  "duplicate_cooldown_seconds": 10.0,
+  "recognized_cache_seconds": 30.0,
+  "track_max_missed_frames": 2,
+  "max_plates_per_frame": 1,
+  "data_dir": "data",
+  "cameras": [
+    {
+      "id": "sample-vietnam_motorbike_intersection",
+      "name": "Vietnam Motorbike Intersection",
+      "uri": "sample_videos/vietnam_motorbike_intersection.mp4",
+      "enabled": true,
+      "loop_video": true
+    }
+  ]
+}
