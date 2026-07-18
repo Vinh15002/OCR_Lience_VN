@@ -85,6 +85,11 @@ class CameraStream:
     def _run(self) -> None:
         is_file = Path(self.config.uri).is_file()
         reconnect_delay = 1.0
+        start_delay = max(0.0, self.config.start_delay_seconds)
+        if start_delay:
+            self._set_status(f"waiting {start_delay:g}s")
+            if self._stop.wait(start_delay):
+                return
         while not self._stop.is_set():
             if self._capture is None or not self._capture.isOpened():
                 if not self._open():

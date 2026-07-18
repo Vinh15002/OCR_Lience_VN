@@ -4,7 +4,7 @@
   "roi_height": 0.65,
   "detection_confidence": 0.35,
   "ocr_confidence": 0.3,
-  "ocr_recognition_model": "PP-OCRv6_tiny_rec",
+  "ocr_recognition_model": "PP-OCRv6_medium_rec",
   "frame_skip": 3,
   "preview_fps": 20,
   "detection_interval_seconds": 0.5,
@@ -17,11 +17,22 @@
   "data_dir": "data",
   "cameras": [
     {
-      "id": "sample-vietnam_motorbike_intersection",
+      "id": "cam-99b87499",
       "name": "Vietnam Motorbike Intersection",
       "uri": "sample_videos/vietnam_motorbike_intersection.mp4",
       "enabled": true,
-      "loop_video": true
+      "loop_video": true,
+      "direction": "IN",
+      "start_delay_seconds": 0.0
+    },
+    {
+      "id": "cam-4b47fda0",
+      "name": "Vietnam Motorbike Intersection",
+      "uri": "sample_videos/vietnam_motorbike_intersection.mp4",
+      "enabled": true,
+      "loop_video": true,
+      "direction": "OUT",
+      "start_delay_seconds": 5.0
     }
   ]
 }

@@ -264,6 +264,7 @@ class RecognitionEngine:
                         confirmed_score,
                         annotated,
                         datetime.now().astimezone(),
+                        direction=camera.direction,
                     )
                 )
                 new_track = RecognizedTrack(

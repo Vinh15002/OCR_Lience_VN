@@ -4,7 +4,7 @@
   "roi_height": 0.65,
   "detection_confidence": 0.35,
   "ocr_confidence": 0.3,
-  "ocr_recognition_model": "PP-OCRv6_tiny_rec",
+  "ocr_recognition_model": "PP-OCRv6_medium_rec",
   "frame_skip": 3,
   "preview_fps": 20,
   "detection_interval_seconds": 0.5,
@@ -21,7 +21,18 @@
       "name": "Cong vao",
       "uri": "0",
       "enabled": true,
-      "loop_video": false
+      "loop_video": false,
+      "direction": "IN",
+      "start_delay_seconds": 0.0
+    },
+    {
+      "id": "gate-out",
+      "name": "Cong ra",
+      "uri": "1",
+      "enabled": true,
+      "loop_video": false,
+      "direction": "OUT",
+      "start_delay_seconds": 15.0
     }
   ]
 }

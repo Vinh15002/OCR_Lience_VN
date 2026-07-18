@@ -13,6 +13,14 @@ class CameraConfig:
     uri: str
     enabled: bool = True
     loop_video: bool = False
+    direction: str = "IN"
+    start_delay_seconds: float = 0.0
+
+    def __post_init__(self) -> None:
+        self.direction = str(self.direction).strip().upper()
+        if self.direction not in {"IN", "OUT"}:
+            raise ValueError(f"Camera direction must be IN or OUT, got: {self.direction}")
+        self.start_delay_seconds = max(0.0, float(self.start_delay_seconds))
 
 
 @dataclass
@@ -22,7 +30,7 @@ class AppConfig:
     roi_height: float = 0.65
     detection_confidence: float = 0.35
     ocr_confidence: float = 0.30
-    ocr_recognition_model: str = "PP-OCRv6_tiny_rec"
+    ocr_recognition_model: str = "PP-OCRv6_medium_rec"
     frame_skip: int = 3
     preview_fps: int = 20
     detection_interval_seconds: float = 0.5
