@@ -22,6 +22,37 @@ def normalize_plate(text: str) -> str:
     return re.sub(r"[^A-Z0-9]", "", str(text).upper())
 
 
+# OCR confuses look-alike glyphs. On a Vietnamese plate we know which slots are
+# digits (province + registration number) and which is a letter (the series),
+# so the fix can be applied per position instead of blindly.
+_LETTER_TO_DIGIT = str.maketrans(
+    {"O": "0", "D": "0", "Q": "0", "I": "1", "L": "1", "Z": "2", "B": "8", "S": "5", "G": "6", "T": "7", "A": "4"}
+)
+_DIGIT_TO_LETTER = str.maketrans(
+    {"0": "O", "1": "I", "2": "Z", "4": "A", "5": "S", "6": "G", "8": "B"}
+)
+
+
+def correct_vietnamese_plate(text: str) -> str:
+    """Repair digit/letter confusions in a near-complete Vietnamese plate.
+
+    Only runs when the string is already close to a full plate so it cannot
+    invent a plausible plate out of random OCR noise. Positions that are
+    genuinely ambiguous (the optional 4th series character) are left untouched.
+    """
+    plate = normalize_plate(text)
+    if not 8 <= len(plate) <= 10:
+        return plate
+    chars = list(plate)
+    chars[0] = chars[0].translate(_LETTER_TO_DIGIT)  # province digit
+    chars[1] = chars[1].translate(_LETTER_TO_DIGIT)  # province digit
+    chars[2] = chars[2].translate(_DIGIT_TO_LETTER)  # series letter
+    for index in range(len(chars) - 5, len(chars)):  # registration number
+        if index >= 3:
+            chars[index] = chars[index].translate(_LETTER_TO_DIGIT)
+    return "".join(chars)
+
+
 def is_plausible_vietnamese_plate(text: str) -> bool:
     plate = normalize_plate(text)
     if not 7 <= len(plate) <= 10:
@@ -43,10 +74,13 @@ class Detection:
 class ProcessedFrame:
     camera_id: str
     camera_name: str
-    frame: np.ndarray
     status: str
     detections: tuple[Detection, ...] = ()
     new_events: tuple[PlateEvent, ...] = ()
+    # The live preview draws its own overlay, so the recognition thread no
+    # longer ships a full annotated frame through the queue. The annotated
+    # snapshot is built only when an event is actually recorded.
+    frame: np.ndarray | None = None
 
 
 @dataclass(frozen=True)
@@ -88,6 +122,21 @@ def boxes_match(
     return area_ratio >= 0.40 and center_distance <= largest_side * 1.25
 
 
+def box_overlaps(
+    box: tuple[int, int, int, int],
+    roi: tuple[int, int, int, int],
+) -> bool:
+    """True when a detection box intersects the ROI gate at all.
+
+    Detection now runs on the whole frame, so a plate that sits on the ROI
+    boundary (typically the nearest vehicle at the bottom of the frame) is kept
+    instead of being clipped away by a hard crop.
+    """
+    ax1, ay1, ax2, ay2 = box
+    bx1, by1, bx2, by2 = roi
+    return min(ax2, bx2) > max(ax1, bx1) and min(ay2, by2) > max(ay1, by1)
+
+
 class ConsensusTracker:
     def __init__(self, min_votes: int, window_seconds: float, cooldown_seconds: float):
         self.min_votes = max(1, min_votes)
@@ -127,6 +176,9 @@ class RecognitionEngine:
         # The detector already returns a tightly cropped plate, so direct text
         # recognition is much faster than running a second text detector.
         self.ocr = TextRecognition(model_name=config.ocr_recognition_model)
+        # Target text-line height fed to the recognizer. Small/distant plates
+        # are upscaled up to this height; plates already larger are left alone.
+        self._ocr_target_height = 64
         self.consensus = ConsensusTracker(
             config.min_votes,
             config.vote_window_seconds,
@@ -146,20 +198,28 @@ class RecognitionEngine:
         if crop.size == 0:
             return "", 0.0
         height, width = crop.shape[:2]
-        inputs: list[np.ndarray]
+        rows: list[np.ndarray]
         if width / max(1, height) < 2.2:
             # Vietnamese motorcycle plates normally have two rows. A small
             # overlap makes the split tolerant of imperfect detector boxes.
             middle = height // 2
             overlap = max(2, int(height * 0.06))
-            inputs = [crop[: middle + overlap], crop[max(0, middle - overlap) :]]
+            rows = [crop[: middle + overlap], crop[max(0, middle - overlap) :]]
         else:
-            inputs = [crop]
-        inputs = [
-            cv2.resize(image, None, fx=3, fy=3, interpolation=cv2.INTER_CUBIC)
-            for image in inputs
-            if image.size
-        ]
+            rows = [crop]
+        inputs: list[np.ndarray] = []
+        for image in rows:
+            if not image.size:
+                continue
+            line_height = image.shape[0]
+            # Only upscale small crops. A distant plate still gets the cubic
+            # boost it needs, while a close-up plate skips the resize entirely.
+            scale = min(3.0, self._ocr_target_height / max(1, line_height))
+            if scale > 1.01:
+                image = cv2.resize(image, None, fx=scale, fy=scale, interpolation=cv2.INTER_CUBIC)
+            inputs.append(image)
+        if not inputs:
+            return "", 0.0
         predictions = self.ocr.predict(input=inputs)
         candidates: list[tuple[str, float]] = []
         for prediction in predictions:
@@ -173,28 +233,33 @@ class RecognitionEngine:
             score = float(result.get("rec_score", 0.0))
             if text and score >= self.config.ocr_confidence:
                 candidates.append((text, score))
-        plate = normalize_plate("".join(text for text, _ in candidates))
+        plate = correct_vietnamese_plate("".join(text for text, _ in candidates))
         score = sum(value for _, value in candidates) / len(candidates) if candidates else 0.0
         return plate, score
 
     def process(self, camera: CameraConfig, frame: np.ndarray) -> ProcessedFrame:
-        annotated = frame.copy()
-        rx1, ry1, rx2, ry2 = self._roi(frame)
-        cv2.rectangle(annotated, (rx1, ry1), (rx2, ry2), (0, 220, 255), 2)
-        cv2.putText(annotated, "ROI", (rx1 + 8, ry1 + 25), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 220, 255), 2)
-        roi = frame[ry1:ry2, rx1:rx2]
+        roi_box = self._roi(frame)
+        rx1, ry1, rx2, ry2 = roi_box
+        height, width = frame.shape[:2]
+        # Detect on the full frame: cropping to the ROI clips plates that sit on
+        # the zone boundary (the nearest vehicle at the bottom of the frame), so
+        # the detector saw a cut-off plate and missed it. The ROI is now only a
+        # gate that decides which detections we keep.
         result = self.model.predict(
-            source=roi,
+            source=frame,
             conf=self.config.detection_confidence,
+            imgsz=self.config.detection_imgsz,
             verbose=False,
         )[0]
 
         ranked = []
-        center_x, center_y = roi.shape[1] / 2, roi.shape[0] / 2
+        roi_center_x, roi_center_y = (rx1 + rx2) / 2, (ry1 + ry2) / 2
         for box in result.boxes:
             x1, y1, x2, y2 = box.xyxy[0].cpu().numpy().astype(int)
+            if not box_overlaps((x1, y1, x2, y2), roi_box):
+                continue
             confidence = float(box.conf[0])
-            distance = ((x1 + x2) / 2 - center_x) ** 2 + ((y1 + y2) / 2 - center_y) ** 2
+            distance = ((x1 + x2) / 2 - roi_center_x) ** 2 + ((y1 + y2) / 2 - roi_center_y) ** 2
             ranked.append((distance, -confidence, x1, y1, x2, y2, confidence))
 
         selected = sorted(ranked)[: self.config.max_plates_per_frame]
@@ -206,8 +271,8 @@ class RecognitionEngine:
         for _, _, x1, y1, x2, y2, detection_score in selected:
             padding = 5
             x1, y1 = max(0, x1 - padding), max(0, y1 - padding)
-            x2, y2 = min(roi.shape[1], x2 + padding), min(roi.shape[0], y2 + padding)
-            full_box = (x1 + rx1, y1 + ry1, x2 + rx1, y2 + ry1)
+            x2, y2 = min(width, x2 + padding), min(height, y2 + padding)
+            full_box = (x1, y1, x2, y2)
 
             cached_track = next(
                 (
@@ -223,20 +288,18 @@ class RecognitionEngine:
                 matched_track_ids.add(id(cached_track))
                 cached_track.box = full_box
                 cached_track.missed_frames = 0
-                detection = Detection(
-                    cached_track.plate,
-                    cached_track.confidence,
-                    detection_score,
-                    full_box,
+                detections.append(
+                    Detection(
+                        cached_track.plate,
+                        cached_track.confidence,
+                        detection_score,
+                        full_box,
+                    )
                 )
-                detections.append(detection)
-                self._draw_detection(annotated, detection, cached=True)
                 continue
 
-            plate, ocr_score = self._read_plate(roi[y1:y2, x1:x2])
-            detection = Detection(plate, ocr_score, detection_score, full_box)
-            detections.append(detection)
-            self._draw_detection(annotated, detection, cached=False)
+            plate, ocr_score = self._read_plate(frame[y1:y2, x1:x2])
+            detections.append(Detection(plate, ocr_score, detection_score, full_box))
             if not is_plausible_vietnamese_plate(plate):
                 continue
             same_plate_track = next(
@@ -256,13 +319,17 @@ class RecognitionEngine:
             consensus = self.consensus.observe(camera.id, plate, ocr_score, now)
             if consensus:
                 confirmed_plate, confirmed_score = consensus
+                # The annotated snapshot is only needed as event evidence, so
+                # the full-frame copy and drawing happen here instead of on
+                # every detection cycle.
+                snapshot = self._annotate(frame, roi_box, detections)
                 events.append(
                     self.event_store.record(
                         camera.id,
                         camera.name,
                         confirmed_plate,
                         confirmed_score,
-                        annotated,
+                        snapshot,
                         datetime.now().astimezone(),
                         direction=camera.direction,
                     )
@@ -289,11 +356,24 @@ class RecognitionEngine:
         return ProcessedFrame(
             camera_id=camera.id,
             camera_name=camera.name,
-            frame=annotated,
             status="connected",
             detections=tuple(detections),
             new_events=tuple(events),
         )
+
+    def _annotate(
+        self,
+        frame: np.ndarray,
+        roi_box: tuple[int, int, int, int],
+        detections: list[Detection],
+    ) -> np.ndarray:
+        annotated = frame.copy()
+        rx1, ry1, rx2, ry2 = roi_box
+        cv2.rectangle(annotated, (rx1, ry1), (rx2, ry2), (0, 220, 255), 2)
+        cv2.putText(annotated, "ROI", (rx1 + 8, ry1 + 25), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 220, 255), 2)
+        for detection in detections:
+            self._draw_detection(annotated, detection, cached=False)
+        return annotated
 
     @staticmethod
     def _draw_detection(annotated: np.ndarray, detection: Detection, cached: bool) -> None:
@@ -365,17 +445,19 @@ class MultiCameraProcessor:
         while not self._stop.is_set():
             did_work = False
             for camera, stream in self.streams_provider():
-                sequence, frame, status = stream.latest()
-                if frame is None:
-                    continue
                 previous = self._last_sequences.get(camera.id, -1)
-                if sequence == previous:
-                    continue
                 now = time.monotonic()
                 interval = max(0.0, self.config.detection_interval_seconds)
+                # Time-gate first so the interval check is a cheap comparison and
+                # we never copy a frame we are about to skip. latest_if_new only
+                # copies when capture produced a newer frame.
                 if interval > 0 and now - self._last_processed_at.get(camera.id, float("-inf")) < interval:
                     continue
+                sequence, frame, status = stream.latest_if_new(previous)
+                if frame is None:
+                    continue
                 if interval <= 0 and sequence % max(1, self.config.frame_skip) != 0:
+                    self._last_sequences[camera.id] = sequence
                     continue
                 self._last_sequences[camera.id] = sequence
                 self._last_processed_at[camera.id] = now

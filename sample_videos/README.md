@@ -35,4 +35,18 @@
 - Resolution: 1920x1080. The local test copy is trimmed to 30 seconds.
 - License information: https://www.pexels.com/license/
 
+## `VideoCar1.mp4`
+
+- Source: unrecorded (added directly via commit `adb4b3e`; original source URL unknown).
+- Scenario: Vietnamese CCTV, elevated fixed-angle view over a motorbike lane, plates legible (e.g. `51G-270.93`, `61-E1 749.54`).
+- Resolution: 1280x720, approximately 15 seconds. Has a burned-in timestamp overlay in the corner.
+- Closest match so far to the intended dedicated gate-camera angle; prefer this over the wide dashcam-style clips above when testing ROI/ OCR accuracy.
+
+## `VideoCar.mp4`
+
+- Source: unrecorded (added directly via commit `0b3c5f8`; original source URL unknown).
+- **Not representative of this project's goal**: this is UK highway dashcam footage of cars (van, Mercedes, Nissan Qashqai) with British-format plates (e.g. `EY61 NBG`), not Vietnamese motorbikes. The detector/OCR pipeline here targets Vietnamese motorbike plates, so this clip will not produce meaningful detections.
+- Resolution: 1280x720, approximately 38 seconds.
+- Kept for now but should not be used to validate or benchmark the recognition pipeline; consider removing if it's not needed for another purpose.
+
 These stock videos are useful for verifying video input and the recognition pipeline. Their camera distance is not representative of a dedicated gate camera, so they should not be used to set the final OCR accuracy target.

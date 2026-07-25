@@ -1,8 +1,9 @@
 {
   "model_path": "license_plate_detector.pt",
-  "roi_width": 0.71,
-  "roi_height": 0.65,
+  "roi_width": 0.8,
+  "roi_height": 0.82,
   "detection_confidence": 0.35,
+  "detection_imgsz": 960,
   "ocr_confidence": 0.3,
   "ocr_recognition_model": "PP-OCRv6_medium_rec",
   "frame_skip": 3,
@@ -14,25 +15,42 @@
   "recognized_cache_seconds": 30.0,
   "track_max_missed_frames": 2,
   "max_plates_per_frame": 1,
+  "open_gate_policy": "all",
+  "gate_open_seconds": 4.0,
+  "parking_flat_fee": 3000,
+  "parking_hourly_fee": 0,
+  "parking_free_minutes": 0,
+  "gate_backend": "simulated",
+  "gate_host": "",
+  "gate_port": 8000,
+  "gate_serial_port": "",
+  "gate_baudrate": 9600,
+  "gate_command": "OPEN",
+  "bank_bin": "",
+  "bank_account": "",
+  "bank_account_name": "",
+  "require_login": false,
+  "auto_start": false,
+  "camera_alert_seconds": 6.0,
   "data_dir": "data",
   "cameras": [
     {
-      "id": "cam-99b87499",
-      "name": "Vietnam Motorbike Intersection",
-      "uri": "sample_videos/vietnam_motorbike_intersection.mp4",
+      "id": "cam-57eca993",
+      "name": "Camera 1",
+      "uri": "http://192.168.179.184:8080/video",
       "enabled": true,
-      "loop_video": true,
+      "loop_video": false,
       "direction": "IN",
       "start_delay_seconds": 0.0
     },
     {
-      "id": "cam-4b47fda0",
-      "name": "Vietnam Motorbike Intersection",
-      "uri": "sample_videos/vietnam_motorbike_intersection.mp4",
+      "id": "cam-cce6938d",
+      "name": "Camera 2",
+      "uri": "http://192.168.179.168:8080/video",
       "enabled": true,
-      "loop_video": true,
+      "loop_video": false,
       "direction": "OUT",
-      "start_delay_seconds": 5.0
+      "start_delay_seconds": 0.0
     }
   ]
 }

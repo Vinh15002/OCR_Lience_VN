@@ -4,3 +4,5 @@ Pillow>=10.0
 ultralytics>=8.3
 paddlepaddle>=3.0
 paddleocr>=3.0
+qrcode>=7.4      # optional: render VietQR payment codes
+pyserial>=3.5    # optional: serial (USB/COM) barrier relay backend
