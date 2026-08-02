@@ -67,6 +67,7 @@ class AppConfig:
     gate_serial_port: str = ""
     gate_baudrate: int = 9600
     gate_command: str = "OPEN"
+    gate_close_command: str = "CLOSE"
     # VietQR bank account for fee collection.
     bank_bin: str = ""
     bank_account: str = ""

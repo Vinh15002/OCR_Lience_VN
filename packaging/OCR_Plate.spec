@@ -34,7 +34,7 @@ hiddenimports = ["plate_app", "plate_app.ui"]
 
 # torch is covered by PyInstaller's own hook; these need explicit collection
 # because they load data files and submodules dynamically.
-for package in ("paddle", "paddlex", "paddleocr", "ultralytics", "qrcode", "serial"):
+for package in ("paddle", "paddlex", "paddleocr", "ultralytics", "qrcode", "reportlab", "serial"):
     package_datas, package_binaries, package_hiddenimports = collect_all(package)
     datas += package_datas
     binaries += package_binaries

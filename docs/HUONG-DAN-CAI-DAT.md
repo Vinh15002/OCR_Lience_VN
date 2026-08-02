@@ -260,7 +260,7 @@ Nội dung chuyển khoản được phần mềm tự điền sẵn dạng `GX<
 Không có mục này thì nhân viên phải tự nhìn tin nhắn ngân hàng rồi bấm *Xác nhận đã thu* — chậm và dễ nhầm.
 Bật đối soát tự động thì phần mềm tự tick khi tiền về, **cửa sổ QR tự đóng** và lượt chuyển sang `✓ Đã thu`.
 
-**Cách hoạt động:** phần mềm hỏi dịch vụ đối soát mỗi 20 giây xem có giao dịch đến mới không, rồi ghép giao dịch với lượt xe theo nội dung `GX<số lượt>`. Nếu nội dung bị mất, phần mềm ghép theo số tiền — nhưng **chỉ khi có đúng một lượt đang nợ đúng số tiền đó**, không bao giờ đoán bừa.
+**Cách hoạt động:** phần mềm hỏi dịch vụ đối soát mỗi 20 giây xem có giao dịch đến mới không, rồi ghép giao dịch với lượt xe theo nội dung `GX<số lượt>`. Nếu nội dung bị mất, phần mềm ghép theo số tiền — nhưng **chỉ khi có đúng một lượt chưa thanh toán đúng số tiền đó**, không bao giờ đoán bừa.
 
 **Các bước:**
 

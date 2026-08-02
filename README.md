@@ -13,7 +13,7 @@
 - Sau khi xác nhận, cache biển đang hiện diện và không chạy OCR lại cho đến khi xe rời ROI.
 - Chống ghi trùng cùng biển trong khoảng cooldown.
 - Lưu ảnh sự kiện và SQLite trong thư mục `data/`.
-- Xem sự kiện gần nhất và xuất CSV.
+- Xem sự kiện gần nhất và xuất CSV/PDF.
 - Gán vai trò `IN`/`OUT` cho từng camera và tự ghép thời gian xe vào/ra.
 - Xem xe đang ở trong, lịch sử lượt và các trường hợp cần kiểm tra.
 - Thanh trạng thái dưới cùng hiển thị trực tiếp: trạng thái chạy, số camera, tổng sự kiện, tốc độ nhận diện (lượt/giây) và **trạng thái barrier**. Bảng sự kiện/lượt được tô màu theo kết quả cổng và INSIDE/COMPLETED/REVIEW.
@@ -64,13 +64,13 @@ Camera không bao giờ đọc đúng 100%, nên mọi tình huống đều có 
 
 ## Thanh toán & doanh thu (mô phỏng)
 
-- Khi xe ra, lượt được tính phí và đánh dấu `Nợ` (khách) hoặc `Miễn` (xe đăng ký/không mất phí).
+- Khi xe ra, lượt được tính phí và đánh dấu `Chưa thanh toán` (khách) hoặc `Miễn` (xe đăng ký/không mất phí).
 - Chọn lượt trong thẻ **Bãi xe** rồi bấm **💵 Thu tiền mặt** hoặc **📱 Thu QR** để thu tiền → chuyển sang `✓ Đã thu`.
 - Nhãn **Doanh thu hôm nay** cập nhật tổng tiền đã thu và số lượt chưa thu. Xuất CSV kèm cột `payment_status`, `paid_at`.
 
 ## Mô phỏng barrier trực quan
 
-Khu **Camera view** có bảng *Mô phỏng barrier*: thanh chắn nâng/hạ động và đèn tín hiệu đỏ/xanh phản ánh đúng trạng thái `SimulatedGate` theo thời gian thực (mở khi cho phép, đỏ + giữ đóng khi từ chối). Đây là bản mô phỏng phần mềm để chạy thử toàn bộ luồng khi chưa gắn phần cứng.
+Khu **Camera view** có bảng *Mô phỏng barrier*: thanh chắn nâng/hạ động và đèn tín hiệu đỏ/xanh phản ánh đúng trạng thái `SimulatedGate` theo thời gian thực (mở khi cho phép, đỏ + giữ đóng khi từ chối). Hai nút **🚧 Mở barrier** và **⛔ Đóng barrier** trên thanh công cụ cho phép nhân viên điều khiển thủ công; mọi thao tác đều được ghi vào nhật ký. Đây là bản mô phỏng phần mềm để chạy thử toàn bộ luồng khi chưa gắn phần cứng.
 
 ## Sửa lỗi OCR biển Việt Nam
 
@@ -78,11 +78,11 @@ Khu **Camera view** có bảng *Mô phỏng barrier*: thanh chắn nâng/hạ đ
 
 ## Vận hành như một sản phẩm
 
-- **Barrier phần cứng:** đặt `gate_backend` = `simulated` (mặc định) / `tcp` / `serial`. Với `tcp` khai báo `gate_host`+`gate_port`; với `serial` khai báo `gate_serial_port`+`gate_baudrate`. Lệnh gửi là `gate_command` (mặc định `OPEN`). Hardware và mô phỏng chạy song song qua `CompositeGate` — barrier trực quan vẫn hoạt động kể cả khi thiết bị offline. Lỗi kết nối không làm sập app (giữ ở `last_error`).
+- **Barrier phần cứng:** đặt `gate_backend` = `simulated` (mặc định) / `tcp` / `serial`. Với `tcp` khai báo `gate_host`+`gate_port`; với `serial` khai báo `gate_serial_port`+`gate_baudrate`. Lệnh mở là `gate_command` (mặc định `OPEN`), lệnh đóng là `gate_close_command` (mặc định `CLOSE`). Hardware và mô phỏng chạy song song qua `CompositeGate` — barrier trực quan vẫn hoạt động kể cả khi thiết bị offline. Lỗi kết nối không làm sập app (giữ ở `last_error`).
 - **Thu tiền QR (VietQR):** đặt `bank_bin` + `bank_account` + `bank_account_name` (khai ngay trong tab Cài đặt, có kiểm tra hợp lệ tại chỗ). Nút **📱 Thu QR** ở thẻ Bãi xe mở mã VietQR đúng số tiền, nội dung chuyển khoản `GX<id lượt> <biển số>`. Cần gói `qrcode` để hiện ảnh.
-- **Tự động xác nhận đã nhận tiền:** đặt `payment_provider` = `sepay` / `casso` + `payment_api_token`. Phần mềm đọc giao dịch đến mỗi `payment_poll_seconds` giây, ghép theo nội dung `GX<id>` (hoặc theo số tiền khi chỉ có duy nhất một lượt nợ đúng số đó) rồi tự chuyển lượt sang `✓ Đã thu` với phương thức `BANK` + mã giao dịch; cửa sổ QR tự đóng. Chuyển thiếu tiền thì không tự xác nhận. Mất mạng chỉ hiện cảnh báo, không ảnh hưởng nhận dạng. Xem [docs/HUONG-DAN-CAI-DAT.md](docs/HUONG-DAN-CAI-DAT.md#63b-tự-động-báo-đã-nhận-tiền-khuyến-nghị).
+- **Tự động xác nhận đã nhận tiền:** đặt `payment_provider` = `sepay` / `casso` + `payment_api_token`. Phần mềm đọc giao dịch đến mỗi `payment_poll_seconds` giây, ghép theo nội dung `GX<id>` (hoặc theo số tiền khi chỉ có duy nhất một lượt chưa thanh toán đúng số đó) rồi tự chuyển lượt sang `✓ Đã thu` với phương thức `BANK` + mã giao dịch; cửa sổ QR tự đóng. Chuyển thiếu tiền thì không tự xác nhận. Mất mạng chỉ hiện cảnh báo, không ảnh hưởng nhận dạng. Xem [docs/HUONG-DAN-CAI-DAT.md](docs/HUONG-DAN-CAI-DAT.md#63b-tự-động-báo-đã-nhận-tiền-khuyến-nghị).
 - **Tài khoản & phân quyền:** đặt `require_login: true` để bắt đăng nhập (mặc định `admin` / `admin` — đổi ngay khi triển khai). `admin` toàn quyền; `operator` không được backup/xóa dữ liệu/quản lý tài khoản. Nút **👤 Tài khoản** để thêm/xóa người dùng.
-- **Báo cáo:** nút **📊 Báo cáo** hiện doanh thu theo ngày + nhật ký hệ thống (audit: đăng nhập, mở/từ chối cổng, thu tiền, backup, xóa dữ liệu).
+- **Báo cáo:** tab **Báo cáo** hiện doanh thu theo ngày + nhật ký hệ thống (audit: đăng nhập, mở/từ chối cổng, thu tiền, backup, xóa dữ liệu). Menu **⬇ Xuất báo cáo** cho phép chọn CSV hoặc PDF; PDF có biểu đồ doanh thu theo ngày, lưu lượng theo giờ, hình thức thanh toán và thời gian gửi xe trước các bảng chi tiết. Sau khi xuất, hộp thoại hiển thị đường dẫn và nút **Mở file** bằng ứng dụng mặc định.
 - **Dọn dữ liệu cũ:** đặt **Giữ dữ liệu (ngày)** ở tab Cài đặt (`retention_days`). Khác 0 thì mỗi lần mở app tự xóa lượt, sự kiện và ảnh cũ hơn số ngày đó; nút **🧹 Dọn dữ liệu cũ** chạy ngay (chỉ admin). Xe đang trong bãi không bao giờ bị xóa dù vào từ lâu.
 - **Sao lưu:** nút **💾 Backup** tạo bản sao `data/backups/events_YYYYMMDD_HHMMSS.db` bằng SQLite backup API (an toàn khi đang chạy).
 - **Tự khởi động & giám sát:** `auto_start: true` tự chạy nhận diện khi mở app; camera mất tín hiệu quá `camera_alert_seconds` giây sẽ hiện **⚠ MẤT KẾT NỐI** trên khung camera.

@@ -38,6 +38,7 @@
   "gate_serial_port": "",
   "gate_baudrate": 9600,
   "gate_command": "OPEN",
+  "gate_close_command": "CLOSE",
   "bank_bin": "970416",
   "bank_account": "48396777",
   "bank_account_name": "TRAN DUC VINH",

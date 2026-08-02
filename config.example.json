@@ -38,6 +38,7 @@
   "gate_host": "",
   "gate_port": 8000,
   "gate_command": "OPEN",
+  "gate_close_command": "CLOSE",
   "bank_bin": "",
   "bank_account": "",
   "bank_account_name": "",

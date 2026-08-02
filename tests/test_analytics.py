@@ -227,6 +227,61 @@ class ExportTests(unittest.TestCase):
             ):
                 self.assertIn(section, headings)
 
+    def test_export_pdf_writes_a_valid_document(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = EventStore(Path(directory), tariff=Tariff(flat_fee=5000))
+            visit = _visit(store, "59X312345", datetime(2026, 7, 25, 8, 0, tzinfo=TZ), 45)
+            store.mark_paid(visit.visit_id, "CASH")
+            span = analytics.DateRange.today_only(today=date(2026, 7, 25))
+            output = Path(directory) / "report.pdf"
+
+            result = analytics.export_report_pdf(store, span, output, capacity=50)
+
+            payload = output.read_bytes()
+            self.assertEqual(result, output)
+            self.assertTrue(payload.startswith(b"%PDF-"))
+            self.assertTrue(payload.rstrip().endswith(b"%%EOF"))
+            self.assertGreater(len(payload), 5_000)
+
+            import pypdfium2 as pdfium
+
+            document = pdfium.PdfDocument(str(output))
+            try:
+                pages = []
+                for index in range(len(document)):
+                    page = document[index]
+                    text_page = page.get_textpage()
+                    try:
+                        pages.append(text_page.get_text_range())
+                    finally:
+                        text_page.close()
+                        page.close()
+                extracted = "\n".join(pages)
+            finally:
+                document.close()
+            for title in (
+                "BIỂU ĐỒ TỔNG QUAN",
+                "Doanh thu theo ngày (đồng)",
+                "Lưu lượng theo giờ",
+                "Doanh thu theo hình thức thanh toán",
+                "Phân bố thời gian gửi xe",
+            ):
+                self.assertIn(title, extracted)
+
+    def test_export_pdf_splits_a_very_long_shift_note_across_pages(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = EventStore(Path(directory))
+            shift = store.open_shift("nhan-vien")
+            long_note = "Ghi chú đối soát tiền mặt có dấu. " * 180
+            store.close_shift(shift["id"], counted_cash=0, note=long_note)
+            output = Path(directory) / "long-note.pdf"
+
+            analytics.export_report_pdf(store, analytics.DateRange.today_only(), output)
+
+            payload = output.read_bytes()
+            self.assertTrue(payload.startswith(b"%PDF-"))
+            self.assertTrue(payload.rstrip().endswith(b"%%EOF"))
+
 
 if __name__ == "__main__":
     unittest.main()

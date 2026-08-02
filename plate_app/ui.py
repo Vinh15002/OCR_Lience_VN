@@ -19,6 +19,7 @@ from . import analytics
 from .auth import ROLE_ADMIN
 from .charts import BarChart, HBarChart, StatTile
 from .config import AppConfig, CameraConfig, load_config, save_config
+from .fileops import open_with_default_app
 from .gate import build_gate
 from .parking import (
     ALLOW,
@@ -50,8 +51,16 @@ class PlateApp(tk.Tk):
     def __init__(self, config_path: Path, cli_sources: list[str] | None = None):
         super().__init__()
         self.title("OCR Plate - Motorcycle Gate")
-        self.geometry("1450x900")
-        self.minsize(1100, 700)
+        screen_width = self.winfo_screenwidth()
+        screen_height = self.winfo_screenheight()
+        min_width = min(screen_width, max(640, min(1000, screen_width - 80)))
+        min_height = min(screen_height, max(480, min(650, screen_height - 120)))
+        initial_width = max(min_width, min(1450, int(screen_width * 0.92)))
+        initial_height = max(min_height, min(900, int(screen_height * 0.88)))
+        left = max(0, (screen_width - initial_width) // 2)
+        top = max(0, (screen_height - initial_height) // 3)
+        self.geometry(f"{initial_width}x{initial_height}+{left}+{top}")
+        self.minsize(min_width, min_height)
         self.config_path = config_path
         self.app_config = load_config(config_path)
         if cli_sources:
@@ -137,59 +146,182 @@ class PlateApp(tk.Tk):
         self._build_report_page(pages["reports"])
         self.notebook.bind("<<NotebookTabChanged>>", self._on_tab_changed)
 
+    def _make_scrollable_tree(
+        self,
+        parent: tk.Misc,
+        *,
+        columns: tuple[str, ...],
+        height: int,
+        expand: bool = True,
+    ) -> ttk.Treeview:
+        """Create a Treeview with permanent vertical and horizontal scrollbars."""
+        host = ttk.Frame(parent)
+        host.pack(fill=tk.BOTH if expand else tk.X, expand=expand)
+        host.columnconfigure(0, weight=1)
+        host.rowconfigure(0, weight=1)
+
+        tree = ttk.Treeview(host, columns=columns, show="headings", height=height)
+        vertical = ttk.Scrollbar(host, orient=tk.VERTICAL, command=tree.yview)
+        horizontal = ttk.Scrollbar(host, orient=tk.HORIZONTAL, command=tree.xview)
+        tree.configure(yscrollcommand=vertical.set, xscrollcommand=horizontal.set)
+        tree.grid(row=0, column=0, sticky="nsew")
+        vertical.grid(row=0, column=1, sticky="ns")
+        horizontal.grid(row=1, column=0, sticky="ew")
+        return tree
+
+    def _make_scrollable_frame(
+        self,
+        parent: tk.Misc,
+        *,
+        horizontal: bool = False,
+        fill_height: bool = False,
+    ) -> tuple[ttk.Frame, tk.Canvas, ttk.Frame]:
+        """Create a canvas-backed frame whose content can grow beyond the viewport."""
+        host = ttk.Frame(parent)
+        host.columnconfigure(0, weight=1)
+        host.rowconfigure(0, weight=1)
+        canvas = tk.Canvas(
+            host,
+            borderwidth=0,
+            highlightthickness=0,
+            background=self._palette["bg"],
+        )
+        vertical = ttk.Scrollbar(host, orient=tk.VERTICAL, command=canvas.yview)
+        canvas.configure(yscrollcommand=vertical.set)
+        canvas.grid(row=0, column=0, sticky="nsew")
+        vertical.grid(row=0, column=1, sticky="ns")
+
+        if horizontal:
+            horizontal_bar = ttk.Scrollbar(host, orient=tk.HORIZONTAL, command=canvas.xview)
+            canvas.configure(xscrollcommand=horizontal_bar.set)
+            horizontal_bar.grid(row=1, column=0, sticky="ew")
+
+        content = ttk.Frame(canvas)
+        content_window = canvas.create_window((0, 0), window=content, anchor="nw")
+
+        def sync_scroll_region(_event=None) -> None:
+            options: dict[str, int] = {}
+            if horizontal and canvas.winfo_width() > 1:
+                options["width"] = max(canvas.winfo_width(), content.winfo_reqwidth())
+            if fill_height and canvas.winfo_height() > 1:
+                options["height"] = max(canvas.winfo_height(), content.winfo_reqheight())
+            if options:
+                canvas.itemconfigure(content_window, **options)
+            canvas.configure(scrollregion=canvas.bbox("all"))
+
+        def fit_viewport(event) -> None:
+            target_width = event.width
+            if horizontal:
+                target_width = max(target_width, content.winfo_reqwidth())
+            options: dict[str, int] = {"width": target_width}
+            if fill_height:
+                options["height"] = max(event.height, content.winfo_reqheight())
+            canvas.itemconfigure(content_window, **options)
+            canvas.configure(scrollregion=canvas.bbox("all"))
+
+        content.bind("<Configure>", sync_scroll_region)
+        canvas.bind("<Configure>", fit_viewport)
+        content._sync_scroll_region = sync_scroll_region
+        return host, canvas, content
+
+    @staticmethod
+    def _bind_canvas_mousewheel(widget: tk.Misc, canvas: tk.Canvas, horizontal: bool = False) -> None:
+        """Let the wheel scroll a canvas while the pointer is over any child control."""
+        def scroll_vertical(event) -> str:
+            if event.delta:
+                canvas.yview_scroll(-1 if event.delta > 0 else 1, "units")
+            return "break"
+
+        widget.bind("<MouseWheel>", scroll_vertical)
+        if horizontal:
+            def scroll_horizontal(event) -> str:
+                if event.delta:
+                    canvas.xview_scroll(-1 if event.delta > 0 else 1, "units")
+                return "break"
+
+            widget.bind("<Shift-MouseWheel>", scroll_horizontal)
+        for child in widget.winfo_children():
+            PlateApp._bind_canvas_mousewheel(child, canvas, horizontal)
+
+    @staticmethod
+    def _set_initial_sash(panes: ttk.Panedwindow, fraction: float) -> None:
+        """Set a useful first split while leaving the sash user-adjustable afterwards."""
+        def position(_event=None) -> None:
+            if getattr(panes, "_initial_sash_set", False):
+                return
+            vertical = str(panes.cget("orient")) == str(tk.VERTICAL)
+            size = panes.winfo_height() if vertical else panes.winfo_width()
+            if size <= 2:
+                panes.after_idle(position)
+                return
+            panes.sashpos(0, int(size * fraction))
+            panes._initial_sash_set = True
+
+        panes.bind("<Map>", position, add="+")
+
     def _build_header(self) -> None:
         palette = self._palette
-        bar = tk.Frame(self, bg=palette["surface"], height=56)
+        bar = tk.Frame(self, bg=palette["surface"])
         bar.pack(fill=tk.X, side=tk.TOP)
-        bar.pack_propagate(False)
         tk.Frame(self, bg="#d5dbe2", height=1).pack(fill=tk.X, side=tk.TOP)
 
+        identity = tk.Frame(bar, bg=palette["surface"])
+        identity.pack(fill=tk.X, padx=14, pady=(6, 2))
         tk.Label(
-            bar, text="OCR PLATE", bg=palette["surface"], fg=palette["text"],
+            identity, text="OCR PLATE", bg=palette["surface"], fg=palette["text"],
             font=("Segoe UI", 14, "bold"),
-        ).pack(side=tk.LEFT, padx=(14, 6))
+        ).pack(side=tk.LEFT, padx=(0, 6))
         tk.Label(
-            bar, text="Hệ thống bãi xe tự động", bg=palette["surface"], fg=palette["muted"],
+            identity, text="Hệ thống bãi xe tự động", bg=palette["surface"], fg=palette["muted"],
             font=("Segoe UI", 9),
         ).pack(side=tk.LEFT)
 
-        self.start_button = ttk.Button(
-            bar, text="▶  Bắt đầu", command=self.start, style="Accent.TButton"
-        )
-        self.start_button.pack(side=tk.LEFT, padx=(28, 4))
-        self.stop_button = ttk.Button(bar, text="■  Dừng", command=self.stop, state=tk.DISABLED)
-        self.stop_button.pack(side=tk.LEFT)
-        ttk.Button(bar, text="🚧  Mở cổng", command=self._open_gate_manually).pack(
-            side=tk.LEFT, padx=(16, 4)
-        )
-        self.shift_button = ttk.Button(bar, text="🕒  Mở ca", command=self._toggle_shift)
-        self.shift_button.pack(side=tk.LEFT)
-
         self.user_label_var = tk.StringVar(value="")
         tk.Label(
-            bar, textvariable=self.user_label_var, bg=palette["surface"], fg=palette["muted"],
-            font=("Segoe UI", 9),
-        ).pack(side=tk.RIGHT, padx=14)
+            identity, textvariable=self.user_label_var, bg=palette["surface"], fg=palette["muted"],
+            font=("Segoe UI", 9), anchor=tk.E,
+        ).pack(side=tk.RIGHT)
         self.shift_label_var = tk.StringVar(value="Chưa mở ca")
         tk.Label(
-            bar, textvariable=self.shift_label_var, bg=palette["surface"], fg=palette["muted"],
-            font=("Segoe UI", 9),
-        ).pack(side=tk.RIGHT, padx=6)
+            identity, textvariable=self.shift_label_var, bg=palette["surface"], fg=palette["muted"],
+            font=("Segoe UI", 9), anchor=tk.E,
+        ).pack(side=tk.RIGHT, padx=12)
+
+        actions = tk.Frame(bar, bg=palette["surface"])
+        actions.pack(fill=tk.X, padx=14, pady=(0, 6))
+        self.start_button = ttk.Button(
+            actions, text="▶  Bắt đầu", command=self.start, style="Accent.TButton"
+        )
+        self.start_button.pack(side=tk.LEFT, padx=(0, 4))
+        self.stop_button = ttk.Button(actions, text="■  Dừng", command=self.stop, state=tk.DISABLED)
+        self.stop_button.pack(side=tk.LEFT)
+        ttk.Button(actions, text="🚧  Mở barrier", command=self._open_gate_manually).pack(
+            side=tk.LEFT, padx=(16, 4)
+        )
+        ttk.Button(actions, text="⛔  Đóng barrier", command=self._close_gate_manually).pack(
+            side=tk.LEFT, padx=(0, 4)
+        )
+        self.shift_button = ttk.Button(actions, text="🕒  Mở ca", command=self._toggle_shift)
+        self.shift_button.pack(side=tk.LEFT)
         self._refresh_shift_widgets()
 
     def _build_monitor_page(self, parent: ttk.Frame) -> None:
         self._build_gate_simulator(parent)
 
-        self.camera_grid = ttk.Frame(parent)
-        self.camera_grid.pack(fill=tk.BOTH, expand=True)
+        split = ttk.Panedwindow(parent, orient=tk.VERTICAL)
+        split.pack(fill=tk.BOTH, expand=True)
+        camera_host, self.camera_canvas, self.camera_grid = self._make_scrollable_frame(
+            split, fill_height=True
+        )
+        split.add(camera_host, weight=3)
         self._rebuild_camera_grid()
 
-        recent = ttk.LabelFrame(parent, text="Nhận dạng gần đây", padding=4)
-        recent.pack(fill=tk.X, pady=(8, 0))
-        self.event_tree = ttk.Treeview(
+        recent = ttk.LabelFrame(split, text="Nhận dạng gần đây", padding=4)
+        split.add(recent, weight=2)
+        self._set_initial_sash(split, 0.55)
+        self.event_tree = self._make_scrollable_tree(
             recent,
             columns=("time", "direction", "plate", "access", "score"),
-            show="headings",
             height=6,
         )
         for column, label, width in (
@@ -200,25 +332,26 @@ class PlateApp(tk.Tk):
             ("score", "Độ tin cậy", 90),
         ):
             self.event_tree.heading(column, text=label)
-            self.event_tree.column(column, width=width, anchor=tk.CENTER)
+            self.event_tree.column(
+                column, width=width, minwidth=max(55, int(width * 0.65)),
+                anchor=tk.CENTER, stretch=True,
+            )
         self.event_tree.tag_configure("ALLOW", background=self._palette["row_in"])
         self.event_tree.tag_configure("GUEST", background=self._palette["row_out"])
         self.event_tree.tag_configure("DENY", background=self._palette["row_review"])
-        self.event_tree.pack(fill=tk.X)
 
     def _build_parking_page(self, parent: ttk.Frame) -> None:
-        parent.columnconfigure(0, weight=2, uniform="parking")
-        parent.columnconfigure(1, weight=3, uniform="parking")
-        parent.rowconfigure(0, weight=1)
+        split = ttk.Panedwindow(parent, orient=tk.HORIZONTAL)
+        split.pack(fill=tk.BOTH, expand=True)
 
-        inside_panel = ttk.LabelFrame(parent, text="Xe đang trong bãi", padding=6)
-        inside_panel.grid(row=0, column=0, sticky="nsew", padx=(0, 6))
+        inside_panel = ttk.LabelFrame(split, text="Xe đang trong bãi", padding=6)
+        split.add(inside_panel, weight=2)
         self.inside_count_var = tk.StringVar(value="0 xe")
         ttk.Label(
             inside_panel, textvariable=self.inside_count_var, style="Heading.TLabel"
         ).pack(anchor=tk.W, pady=(0, 4))
-        self.inside_tree = ttk.Treeview(
-            inside_panel, columns=("plate", "type", "entry", "camera"), show="headings", height=16
+        self.inside_tree = self._make_scrollable_tree(
+            inside_panel, columns=("plate", "type", "entry", "camera"), height=16
         )
         for column, label, width in (
             ("plate", "Biển số", 110),
@@ -227,9 +360,11 @@ class PlateApp(tk.Tk):
             ("camera", "Cổng vào", 100),
         ):
             self.inside_tree.heading(column, text=label)
-            self.inside_tree.column(column, width=width, anchor=tk.CENTER)
+            self.inside_tree.column(
+                column, width=width, minwidth=max(55, int(width * 0.65)),
+                anchor=tk.CENTER, stretch=True,
+            )
         self.inside_tree.tag_configure("IN", background=self._palette["row_in"])
-        self.inside_tree.pack(fill=tk.BOTH, expand=True)
 
         manual = ttk.LabelFrame(inside_panel, text="Ghi thủ công (mất vé / camera không đọc được)", padding=6)
         manual.pack(fill=tk.X, pady=(6, 0))
@@ -252,34 +387,40 @@ class PlateApp(tk.Tk):
             buttons, text="Ghi xe RA ➡", command=lambda: self._record_manual_event("OUT")
         ).pack(side=tk.LEFT, padx=4)
 
-        visits_panel = ttk.LabelFrame(parent, text="Lượt gửi xe & thu phí", padding=6)
-        visits_panel.grid(row=0, column=1, sticky="nsew", padx=(6, 0))
-        actions = ttk.Frame(visits_panel)
-        actions.pack(fill=tk.X, pady=(0, 4))
+        visits_panel = ttk.LabelFrame(split, text="Lượt gửi xe & thu phí", padding=6)
+        split.add(visits_panel, weight=3)
+        self._set_initial_sash(split, 0.40)
+        primary_actions = ttk.Frame(visits_panel)
+        primary_actions.pack(fill=tk.X, pady=(0, 2))
         ttk.Button(
-            actions, text="💵 Thu tiền mặt", command=lambda: self._collect_payment("CASH"),
+            primary_actions, text="💵 Thu tiền mặt", command=lambda: self._collect_payment("CASH"),
             style="Accent.TButton",
         ).pack(side=tk.LEFT)
-        ttk.Button(actions, text="📱 Thu QR", command=lambda: self._collect_payment("QR")).pack(
+        ttk.Button(primary_actions, text="📱 Thu QR", command=lambda: self._collect_payment("QR")).pack(
             side=tk.LEFT, padx=4
         )
-        ttk.Button(actions, text="🟣 Thu MoMo", command=lambda: self._collect_payment("MOMO")).pack(
+        ttk.Button(primary_actions, text="🟣 Thu MoMo", command=lambda: self._collect_payment("MOMO")).pack(
             side=tk.LEFT
         )
-        ttk.Button(actions, text="🔍 Đối soát", command=self._show_visit_review).pack(side=tk.LEFT)
-        ttk.Button(actions, text="✏ Sửa biển", command=self._correct_visit_plate).pack(
+        secondary_actions = ttk.Frame(visits_panel)
+        secondary_actions.pack(fill=tk.X, pady=(0, 2))
+        ttk.Button(secondary_actions, text="🔍 Đối soát", command=self._show_visit_review).pack(
+            side=tk.LEFT
+        )
+        ttk.Button(secondary_actions, text="✏ Sửa biển", command=self._correct_visit_plate).pack(
             side=tk.LEFT, padx=4
         )
-        ttk.Button(actions, text="🏍 Đổi loại xe", command=self._retype_visit).pack(side=tk.LEFT)
-        ttk.Button(actions, text="Xuất CSV", command=self._export_visits_csv).pack(side=tk.RIGHT)
+        ttk.Button(secondary_actions, text="🏍 Đổi loại xe", command=self._retype_visit).pack(side=tk.LEFT)
+        export_actions = ttk.Frame(visits_panel)
+        export_actions.pack(fill=tk.X, pady=(0, 4))
+        ttk.Button(export_actions, text="Xuất CSV", command=self._export_visits_csv).pack(side=tk.RIGHT)
         self.revenue_var = tk.StringVar(value="Doanh thu hôm nay: 0")
         ttk.Label(visits_panel, textvariable=self.revenue_var, foreground="#1f6fe0").pack(
             anchor=tk.W, pady=(0, 4)
         )
-        self.visit_tree = ttk.Treeview(
+        self.visit_tree = self._make_scrollable_tree(
             visits_panel,
             columns=("plate", "type", "entry", "exit", "duration", "fee", "pay", "flag"),
-            show="headings",
             height=18,
         )
         for column, label, width in (
@@ -289,17 +430,20 @@ class PlateApp(tk.Tk):
             ("exit", "Ra", 70),
             ("duration", "Thời gian", 85),
             ("fee", "Phí", 75),
-            ("pay", "Thanh toán", 85),
+            ("pay", "Thanh toán", 125),
             ("flag", "Đối soát", 110),
         ):
             self.visit_tree.heading(column, text=label)
-            self.visit_tree.column(column, width=width, anchor=tk.CENTER)
+            self.visit_tree.column(
+                column, width=width, minwidth=max(55, int(width * 0.65)),
+                anchor=tk.CENTER, stretch=True,
+            )
+        self.visit_tree.column("pay", minwidth=115)
         self.visit_tree.tag_configure("INSIDE", background=self._palette["row_in"])
         self.visit_tree.tag_configure("COMPLETED", background=self._palette["row_muted"])
         self.visit_tree.tag_configure("REVIEW", background=self._palette["row_review"])
         self.visit_tree.tag_configure("FLAGGED", background="#ffe9c7")
         self.visit_tree.bind("<Double-1>", lambda _event: self._show_visit_review())
-        self.visit_tree.pack(fill=tk.BOTH, expand=True)
         ttk.Label(
             visits_panel,
             text="Bấm đúp một lượt để mở cửa sổ đối soát ảnh xe vào / xe ra.",
@@ -411,32 +555,36 @@ class PlateApp(tk.Tk):
         bar.pack(side=tk.BOTTOM, fill=tk.X)
         bar.pack_propagate(False)
 
-        self.state_dot = tk.Label(bar, text="●", bg=palette["statusbar"], fg=palette["off"], font=("Segoe UI", 11))
+        stats = tk.Frame(bar, bg=palette["statusbar"])
+        stats.pack(side=tk.LEFT, fill=tk.Y)
+
+        self.state_dot = tk.Label(stats, text="●", bg=palette["statusbar"], fg=palette["off"], font=("Segoe UI", 11))
         self.state_dot.pack(side=tk.LEFT, padx=(12, 4))
         self.state_text = tk.Label(
-            bar, text="Stopped", bg=palette["statusbar"], fg=palette["status_text"], font=("Segoe UI", 9, "bold")
+            stats, text="Stopped", bg=palette["statusbar"], fg=palette["status_text"], font=("Segoe UI", 9, "bold")
         )
         self.state_text.pack(side=tk.LEFT)
 
         def separator() -> None:
-            tk.Label(bar, text="│", bg=palette["statusbar"], fg=palette["status_sep"]).pack(side=tk.LEFT, padx=10)
+            tk.Label(stats, text="│", bg=palette["statusbar"], fg=palette["status_sep"]).pack(side=tk.LEFT, padx=10)
 
         separator()
-        self.cams_stat = tk.Label(bar, text="Cameras 0", bg=palette["statusbar"], fg=palette["status_text"], font=("Segoe UI", 9))
+        self.cams_stat = tk.Label(stats, text="Cameras 0", bg=palette["statusbar"], fg=palette["status_text"], font=("Segoe UI", 9))
         self.cams_stat.pack(side=tk.LEFT)
         separator()
-        self.events_stat = tk.Label(bar, text="Events 0", bg=palette["statusbar"], fg=palette["status_text"], font=("Segoe UI", 9))
+        self.events_stat = tk.Label(stats, text="Events 0", bg=palette["statusbar"], fg=palette["status_text"], font=("Segoe UI", 9))
         self.events_stat.pack(side=tk.LEFT)
         separator()
-        self.fps_stat = tk.Label(bar, text="Detect 0.0/s", bg=palette["statusbar"], fg=palette["status_text"], font=("Segoe UI", 9))
+        self.fps_stat = tk.Label(stats, text="Detect 0.0/s", bg=palette["statusbar"], fg=palette["status_text"], font=("Segoe UI", 9))
         self.fps_stat.pack(side=tk.LEFT)
         separator()
-        self.gate_stat = tk.Label(bar, text="⛔ Cổng đóng", bg=palette["statusbar"], fg=palette["off"], font=("Segoe UI", 9, "bold"))
+        self.gate_stat = tk.Label(stats, text="⛔ Cổng đóng", bg=palette["statusbar"], fg=palette["off"], font=("Segoe UI", 9, "bold"))
         self.gate_stat.pack(side=tk.LEFT)
 
         tk.Label(
-            bar, textvariable=self.status_var, bg=palette["statusbar"], fg=palette["status_text"], font=("Segoe UI", 9)
-        ).pack(side=tk.RIGHT, padx=12)
+            bar, textvariable=self.status_var, bg=palette["statusbar"], fg=palette["status_text"],
+            font=("Segoe UI", 9), anchor=tk.E,
+        ).pack(side=tk.RIGHT, fill=tk.X, expand=True, padx=12)
 
     def _update_stats(self) -> None:
         palette = self._palette
@@ -595,10 +743,9 @@ class PlateApp(tk.Tk):
         ttk.Label(listing, textvariable=self.expiring_var, foreground=self._palette["danger"]).pack(
             anchor=tk.W, pady=(0, 4)
         )
-        self.vehicle_tree = ttk.Treeview(
+        self.vehicle_tree = self._make_scrollable_tree(
             listing,
             columns=("plate", "owner", "phone", "type", "access", "until", "left"),
-            show="headings",
             height=14,
         )
         for column, label, width in (
@@ -611,60 +758,31 @@ class PlateApp(tk.Tk):
             ("left", "Còn lại", 85),
         ):
             self.vehicle_tree.heading(column, text=label)
-            self.vehicle_tree.column(column, width=width, anchor=tk.CENTER)
+            self.vehicle_tree.column(
+                column, width=width, minwidth=max(55, int(width * 0.65)),
+                anchor=tk.CENTER, stretch=True,
+            )
         self.vehicle_tree.tag_configure(ALLOW, background=self._palette["row_in"])
         self.vehicle_tree.tag_configure(DENY, background=self._palette["row_review"])
         self.vehicle_tree.tag_configure("EXPIRING", background="#ffe9c7")
         self.vehicle_tree.tag_configure("EXPIRED", background=self._palette["row_review"])
-        self.vehicle_tree.pack(fill=tk.BOTH, expand=True)
         self.vehicle_tree.bind("<<TreeviewSelect>>", self._vehicle_selected)
         self._refresh_vehicle_list()
 
     def _build_settings_page(self, parent: ttk.Frame) -> None:
-        parent.columnconfigure(0, weight=3, uniform="settings")
-        parent.columnconfigure(1, weight=2, uniform="settings")
-        parent.rowconfigure(0, weight=1)
-
-        left = ttk.Frame(parent)
-        left.grid(row=0, column=0, sticky="nsew", padx=(0, 6))
+        split = ttk.Panedwindow(parent, orient=tk.HORIZONTAL)
+        split.pack(fill=tk.BOTH, expand=True)
+        left = ttk.Frame(split)
+        split.add(left, weight=1)
 
         # The settings column is taller than the window on smaller displays.
-        # Put it in a canvas so every section remains reachable by scrollbar
-        # or mouse wheel without changing the layout of the camera column.
-        right_host = ttk.Frame(parent)
-        right_host.grid(row=0, column=1, sticky="nsew", padx=(6, 0))
-        right_host.columnconfigure(0, weight=1)
-        right_host.rowconfigure(0, weight=1)
-
-        right_canvas = tk.Canvas(
-            right_host,
-            borderwidth=0,
-            highlightthickness=0,
-            background=self._palette["bg"],
+        # It can also grow wider at high DPI, so Shift+wheel and the horizontal
+        # bar keep every field reachable when either pane is made very narrow.
+        right_host, right_canvas, right = self._make_scrollable_frame(
+            split, horizontal=True
         )
-        right_scrollbar = ttk.Scrollbar(
-            right_host, orient=tk.VERTICAL, command=right_canvas.yview
-        )
-        right_canvas.configure(yscrollcommand=right_scrollbar.set)
-        right_canvas.grid(row=0, column=0, sticky="nsew")
-        right_scrollbar.grid(row=0, column=1, sticky="ns")
-
-        right = ttk.Frame(right_canvas)
-        right_window = right_canvas.create_window((0, 0), window=right, anchor="nw")
-
-        def update_scroll_region(_event=None) -> None:
-            right_canvas.configure(scrollregion=right_canvas.bbox("all"))
-
-        def fit_content_width(event) -> None:
-            right_canvas.itemconfigure(right_window, width=event.width)
-
-        def scroll_settings(event) -> None:
-            if event.delta:
-                right_canvas.yview_scroll(-1 if event.delta > 0 else 1, "units")
-            return "break"
-
-        right.bind("<Configure>", update_scroll_region)
-        right_canvas.bind("<Configure>", fit_content_width)
+        split.add(right_host, weight=1)
+        self._set_initial_sash(split, 0.55)
 
         self._build_sources_settings(left)
         self._build_recognition_settings(right)
@@ -672,15 +790,8 @@ class PlateApp(tk.Tk):
         self._build_payment_settings(right)
         self._build_system_settings(right)
 
-        # Bind each child directly so wheel scrolling also works above entries,
-        # spinboxes and comboboxes, without installing a global application bind.
-        def bind_mousewheel(widget) -> None:
-            widget.bind("<MouseWheel>", scroll_settings, add="+")
-            for child in widget.winfo_children():
-                bind_mousewheel(child)
-
-        bind_mousewheel(right_canvas)
-        bind_mousewheel(right)
+        self._bind_canvas_mousewheel(right_canvas, right_canvas, horizontal=True)
+        self._bind_canvas_mousewheel(right, right_canvas, horizontal=True)
 
     def _build_sources_settings(self, parent: ttk.Frame) -> None:
         panel = ttk.LabelFrame(parent, text="Nguồn video / camera", padding=8)
@@ -703,74 +814,83 @@ class PlateApp(tk.Tk):
             self.sample_var.set(
                 current_name if current_name in self.sample_lookup else sample_paths[0].name
             )
+        sample_options = ttk.Frame(panel)
+        sample_options.pack(fill=tk.X, pady=(0, 4))
+        ttk.Label(sample_options, text="Chiều").pack(side=tk.LEFT)
         self.sample_direction_var = tk.StringVar(value="IN")
         self.sample_direction_combo = ttk.Combobox(
-            video_row, textvariable=self.sample_direction_var, values=("IN", "OUT"),
+            sample_options, textvariable=self.sample_direction_var, values=("IN", "OUT"),
             width=5, state="readonly",
         )
         self.sample_direction_combo.pack(side=tk.LEFT, padx=2)
         self.sample_direction_combo.bind("<<ComboboxSelected>>", self._sample_direction_changed)
-        ttk.Label(video_row, text="Trễ (s)").pack(side=tk.LEFT, padx=(8, 2))
+        ttk.Label(sample_options, text="Trễ (s)").pack(side=tk.LEFT, padx=(8, 2))
         self.sample_delay_var = tk.DoubleVar(value=0.0)
         ttk.Spinbox(
-            video_row, from_=0, to=300, increment=1, width=5, textvariable=self.sample_delay_var
+            sample_options, from_=0, to=300, increment=1, width=5, textvariable=self.sample_delay_var
         ).pack(side=tk.LEFT)
         self.sample_loop_var = tk.BooleanVar(value=True)
         ttk.Checkbutton(
-            video_row, text="Lặp video", variable=self.sample_loop_var
+            sample_options, text="Lặp video", variable=self.sample_loop_var
         ).pack(side=tk.LEFT, padx=(8, 0))
 
         buttons = ttk.Frame(panel)
         buttons.pack(fill=tk.X, pady=(0, 8))
         ttk.Button(buttons, text="Thay toàn bộ bằng video mẫu", command=self._use_sample).pack(side=tk.LEFT)
         ttk.Button(buttons, text="Thêm video mẫu", command=self._add_sample).pack(side=tk.LEFT, padx=4)
-        ttk.Button(buttons, text="Mở file video...", command=self._add_video).pack(side=tk.LEFT)
+        ttk.Button(panel, text="Mở file video...", command=self._add_video).pack(anchor=tk.W, pady=(0, 6))
 
         uri_row = ttk.Frame(panel)
         uri_row.pack(fill=tk.X, pady=(0, 8))
-        ttk.Label(uri_row, text="Camera IP / RTSP / webcam").pack(side=tk.LEFT)
+        uri_row.columnconfigure(1, weight=1)
+        ttk.Label(uri_row, text="Camera IP / RTSP / webcam").grid(row=0, column=0, sticky=tk.W)
         self.source_var = tk.StringVar()
-        ttk.Entry(uri_row, textvariable=self.source_var, width=30).pack(side=tk.LEFT, padx=6)
-        ttk.Button(uri_row, text="Thêm nguồn", command=self._add_uri).pack(side=tk.LEFT)
+        ttk.Entry(uri_row, textvariable=self.source_var, width=12).grid(
+            row=0, column=1, sticky="ew", padx=6
+        )
+        ttk.Button(uri_row, text="Thêm nguồn", command=self._add_uri).grid(row=0, column=2)
 
-        self.source_tree = ttk.Treeview(
+        self.source_tree = self._make_scrollable_tree(
             panel, columns=("direction", "delay", "loop", "name", "uri"),
-            show="headings", height=9,
+            height=9,
         )
         self.source_tree.heading("direction", text="Chiều")
         self.source_tree.heading("delay", text="Trễ")
         self.source_tree.heading("loop", text="Lặp")
         self.source_tree.heading("name", text="Tên")
         self.source_tree.heading("uri", text="Nguồn")
-        self.source_tree.column("direction", width=55, anchor=tk.CENTER)
-        self.source_tree.column("delay", width=50, anchor=tk.CENTER)
-        self.source_tree.column("loop", width=45, anchor=tk.CENTER)
-        self.source_tree.column("name", width=120)
-        self.source_tree.column("uri", width=220)
-        self.source_tree.pack(fill=tk.BOTH, expand=True)
+        self.source_tree.column("direction", width=55, minwidth=55, anchor=tk.CENTER, stretch=False)
+        self.source_tree.column("delay", width=50, minwidth=50, anchor=tk.CENTER, stretch=False)
+        self.source_tree.column("loop", width=45, minwidth=45, anchor=tk.CENTER, stretch=False)
+        self.source_tree.column("name", width=130, minwidth=90)
+        self.source_tree.column("uri", width=360, minwidth=180)
         self.source_tree.bind("<<TreeviewSelect>>", self._source_selected)
 
-        actions = ttk.Frame(panel)
-        actions.pack(fill=tk.X, pady=(6, 0))
-        ttk.Label(actions, text="Chiều").pack(side=tk.LEFT)
+        source_fields = ttk.Frame(panel)
+        source_fields.pack(fill=tk.X, pady=(6, 2))
+        ttk.Label(source_fields, text="Chiều").pack(side=tk.LEFT)
         self.camera_direction_var = tk.StringVar(value="IN")
         ttk.Combobox(
-            actions, textvariable=self.camera_direction_var, values=("IN", "OUT"),
+            source_fields, textvariable=self.camera_direction_var, values=("IN", "OUT"),
             state="readonly", width=5,
         ).pack(side=tk.LEFT, padx=4)
-        ttk.Label(actions, text="Trễ (s)").pack(side=tk.LEFT, padx=(6, 2))
+        ttk.Label(source_fields, text="Trễ (s)").pack(side=tk.LEFT, padx=(6, 2))
         self.camera_delay_var = tk.DoubleVar(value=0.0)
         ttk.Spinbox(
-            actions, from_=0, to=300, increment=1, width=5, textvariable=self.camera_delay_var
+            source_fields, from_=0, to=300, increment=1, width=5, textvariable=self.camera_delay_var
         ).pack(side=tk.LEFT)
         self.camera_loop_var = tk.BooleanVar(value=False)
-        ttk.Checkbutton(actions, text="Lặp video", variable=self.camera_loop_var).pack(
+        ttk.Checkbutton(source_fields, text="Lặp video", variable=self.camera_loop_var).pack(
             side=tk.LEFT, padx=(8, 0)
         )
-        ttk.Button(actions, text="Áp dụng cho nguồn đã chọn", command=self._set_selected_direction).pack(
-            side=tk.LEFT, padx=6
+        source_actions = ttk.Frame(panel)
+        source_actions.pack(fill=tk.X)
+        ttk.Button(
+            source_actions, text="Áp dụng cho nguồn đã chọn", command=self._set_selected_direction
+        ).pack(
+            side=tk.LEFT
         )
-        ttk.Button(actions, text="Xóa nguồn", command=self._remove_selected).pack(side=tk.RIGHT)
+        ttk.Button(source_actions, text="Xóa nguồn", command=self._remove_selected).pack(side=tk.RIGHT)
 
     def _build_recognition_settings(self, parent: ttk.Frame) -> None:
         panel = ttk.LabelFrame(parent, text="Nhận dạng", padding=8)
@@ -867,18 +987,21 @@ class PlateApp(tk.Tk):
         ttk.Spinbox(
             row4, from_=0, to=10_000_000, increment=5_000, width=9, textvariable=self.overnight_var
         ).pack(side=tk.LEFT, padx=(4, 10))
-        ttk.Label(row4, text="Giờ tính đêm").pack(side=tk.LEFT)
-        self.night_hour_var = tk.IntVar(value=self.app_config.parking_night_hour)
-        ttk.Spinbox(
-            row4, from_=0, to=23, width=4, textvariable=self.night_hour_var
-        ).pack(side=tk.LEFT, padx=4)
 
         row5 = ttk.Frame(panel)
         row5.pack(fill=tk.X, pady=3)
-        ttk.Label(row5, text="Loại xe mặc định").pack(side=tk.LEFT)
+        ttk.Label(row5, text="Giờ tính đêm").pack(side=tk.LEFT)
+        self.night_hour_var = tk.IntVar(value=self.app_config.parking_night_hour)
+        ttk.Spinbox(
+            row5, from_=0, to=23, width=4, textvariable=self.night_hour_var
+        ).pack(side=tk.LEFT, padx=4)
+
+        row6 = ttk.Frame(panel)
+        row6.pack(fill=tk.X, pady=3)
+        ttk.Label(row6, text="Loại xe mặc định").pack(side=tk.LEFT)
         self.default_type_var = tk.StringVar(value=self.app_config.default_vehicle_type)
         ttk.Combobox(
-            row5, textvariable=self.default_type_var, values=VEHICLE_TYPES,
+            row6, textvariable=self.default_type_var, values=VEHICLE_TYPES,
             state="readonly", width=11,
         ).pack(side=tk.LEFT, padx=4)
 
@@ -941,17 +1064,20 @@ class PlateApp(tk.Tk):
         ttk.Combobox(
             row1, textvariable=self.bank_choice_var, values=bank_options,
             state="readonly", width=25,
-        ).pack(side=tk.LEFT, padx=(4, 10))
-        ttk.Label(row1, text="Số tài khoản").pack(side=tk.LEFT)
-        self.bank_account_var = tk.StringVar(value=self.app_config.bank_account)
-        ttk.Entry(row1, textvariable=self.bank_account_var, width=18).pack(side=tk.LEFT, padx=4)
+        ).pack(side=tk.LEFT, padx=4)
 
         row2 = ttk.Frame(panel)
         row2.pack(fill=tk.X, pady=3)
-        ttk.Label(row2, text="Tên chủ TK").pack(side=tk.LEFT)
+        ttk.Label(row2, text="Số tài khoản").pack(side=tk.LEFT)
+        self.bank_account_var = tk.StringVar(value=self.app_config.bank_account)
+        ttk.Entry(row2, textvariable=self.bank_account_var, width=18).pack(side=tk.LEFT, padx=4)
+
+        row3 = ttk.Frame(panel)
+        row3.pack(fill=tk.X, pady=3)
+        ttk.Label(row3, text="Tên chủ TK").pack(side=tk.LEFT)
         self.bank_name_var = tk.StringVar(value=self.app_config.bank_account_name)
-        ttk.Entry(row2, textvariable=self.bank_name_var, width=28).pack(side=tk.LEFT, padx=4)
-        ttk.Button(row2, text="Lưu & kiểm tra", command=self._apply_bank_settings).pack(
+        ttk.Entry(row3, textvariable=self.bank_name_var, width=24).pack(side=tk.LEFT, padx=4)
+        ttk.Button(row3, text="Lưu & kiểm tra", command=self._apply_bank_settings).pack(
             side=tk.LEFT, padx=6
         )
         self.bank_status_var = tk.StringVar(value="")
@@ -962,28 +1088,28 @@ class PlateApp(tk.Tk):
 
         auto = ttk.LabelFrame(panel, text="Tự động xác nhận đã nhận tiền", padding=6)
         auto.pack(fill=tk.X, pady=(8, 0))
-        row3 = ttk.Frame(auto)
-        row3.pack(fill=tk.X, pady=2)
-        ttk.Label(row3, text="Dịch vụ").pack(side=tk.LEFT)
+        feed_row1 = ttk.Frame(auto)
+        feed_row1.pack(fill=tk.X, pady=2)
+        ttk.Label(feed_row1, text="Dịch vụ").pack(side=tk.LEFT)
         self.payment_provider_var = tk.StringVar(value=self.app_config.payment_provider)
         ttk.Combobox(
-            row3, textvariable=self.payment_provider_var, values=PROVIDERS,
+            feed_row1, textvariable=self.payment_provider_var, values=PROVIDERS,
             state="readonly", width=8,
         ).pack(side=tk.LEFT, padx=(4, 10))
-        ttk.Label(row3, text="Chu kỳ (s)").pack(side=tk.LEFT)
+        ttk.Label(feed_row1, text="Chu kỳ (s)").pack(side=tk.LEFT)
         self.payment_poll_var = tk.DoubleVar(value=self.app_config.payment_poll_seconds)
         ttk.Spinbox(
-            row3, from_=5, to=600, increment=5, width=6, textvariable=self.payment_poll_var
+            feed_row1, from_=5, to=600, increment=5, width=6, textvariable=self.payment_poll_var
         ).pack(side=tk.LEFT, padx=4)
 
-        row4 = ttk.Frame(auto)
-        row4.pack(fill=tk.X, pady=2)
-        ttk.Label(row4, text="API token").pack(side=tk.LEFT)
+        feed_row2 = ttk.Frame(auto)
+        feed_row2.pack(fill=tk.X, pady=2)
+        ttk.Label(feed_row2, text="API token").pack(side=tk.LEFT)
         self.payment_token_var = tk.StringVar(value=self.app_config.payment_api_token)
-        ttk.Entry(row4, textvariable=self.payment_token_var, width=26, show="•").pack(
+        ttk.Entry(feed_row2, textvariable=self.payment_token_var, width=26, show="•").pack(
             side=tk.LEFT, padx=4
         )
-        ttk.Button(row4, text="Áp dụng", command=self._apply_feed_settings).pack(side=tk.LEFT, padx=4)
+        ttk.Button(feed_row2, text="Áp dụng", command=self._apply_feed_settings).pack(side=tk.LEFT, padx=4)
 
         self.feed_status_var = tk.StringVar(value=self._feed_status or "Tắt")
         ttk.Label(
@@ -1457,6 +1583,10 @@ class PlateApp(tk.Tk):
     def _rebuild_camera_grid(self) -> None:
         for child in self.camera_grid.winfo_children():
             child.destroy()
+        for column in range(2):
+            self.camera_grid.columnconfigure(column, weight=0, minsize=0, uniform="")
+        for row in range(getattr(self, "_camera_grid_rows", 1)):
+            self.camera_grid.rowconfigure(row, weight=0, minsize=0, uniform="")
         self.camera_labels.clear()
         self.camera_panels.clear()
         self.camera_images.clear()
@@ -1479,18 +1609,22 @@ class PlateApp(tk.Tk):
             self.camera_labels[camera.id] = label
             self.camera_panels[camera.id] = panel
         rows = max(1, math.ceil(max(1, len(cameras)) / columns))
+        self._camera_grid_rows = rows
         # uniform groups force every column/row to the same size regardless of
         # the video resolution shown inside, so all camera panels stay equal.
         for column in range(columns):
-            self.camera_grid.columnconfigure(column, weight=1, uniform="cam")
+            self.camera_grid.columnconfigure(column, weight=1, minsize=300, uniform="cam")
         for row in range(rows):
-            self.camera_grid.rowconfigure(row, weight=1, uniform="cam")
+            self.camera_grid.rowconfigure(row, weight=1, minsize=230, uniform="cam")
         if not cameras:
             ttk.Label(
                 self.camera_grid,
                 text="Add a video, webcam index (0), or RTSP camera to begin.",
                 anchor=tk.CENTER,
             ).grid(row=0, column=0, sticky="nsew")
+        self._bind_canvas_mousewheel(self.camera_canvas, self.camera_canvas)
+        self._bind_canvas_mousewheel(self.camera_grid, self.camera_canvas)
+        self.camera_grid.after_idle(self.camera_grid._sync_scroll_region)
 
     def _save_settings(self) -> None:
         self.app_config.roi_width = max(0.2, min(1.0, self.roi_width_var.get() / 100))
@@ -1678,8 +1812,10 @@ class PlateApp(tk.Tk):
         label = self.camera_labels.get(camera_id)
         if label is None:
             return
-        width = max(320, label.winfo_width() - 8)
-        height = max(240, label.winfo_height() - 8)
+        width = label.winfo_width() - 8
+        height = label.winfo_height() - 8
+        if width < 16 or height < 16:
+            return
         frame_height, frame_width = frame.shape[:2]
         scale = min(width / frame_width, height / frame_height)
         resized = cv2.resize(
@@ -1788,7 +1924,7 @@ class PlateApp(tk.Tk):
             self.visit_tree.selection_set(still_there)
         self._refresh_revenue()
 
-    _PAY_LABELS = {"PAID": "✓ Đã thu", "UNPAID": "Nợ", "EXEMPT": "Miễn"}
+    _PAY_LABELS = {"PAID": "✓ Đã thu", "UNPAID": "Chưa thanh toán", "EXEMPT": "Miễn"}
 
     _FLAG_LABELS = {
         "low_confidence": "Đọc biển yếu",
@@ -2057,10 +2193,19 @@ class PlateApp(tk.Tk):
 
     def _open_gate_manually(self) -> None:
         """Let the guard raise the barrier when the camera cannot decide."""
-        self.gate.open(self.app_config.gate_open_seconds)
+        self.gate.open("manual", plate="")
         user = self.current_user.username if self.current_user else None
         self.event_store.write_audit(user, "GATE_MANUAL", "mở cổng thủ công")
-        self.status_var.set("Đã mở cổng thủ công")
+        self.status_var.set("Đã mở barrier thủ công")
+        self._update_stats()
+
+    def _close_gate_manually(self) -> None:
+        """Lower the simulated barrier and send CLOSE to configured hardware."""
+        self.gate.close("manual")
+        user = self.current_user.username if self.current_user else None
+        self.event_store.write_audit(user, "GATE_MANUAL_CLOSE", "đóng cổng thủ công")
+        self.status_var.set("Đã đóng barrier thủ công")
+        self._update_stats()
 
     def _refresh_shift_widgets(self) -> None:
         if self.active_shift:
@@ -2361,13 +2506,18 @@ class PlateApp(tk.Tk):
         window.transient(self)
         window.grab_set()
         window.geometry("440x420")
+        window.minsize(380, 300)
         frame = ttk.Frame(window, padding=10)
         frame.pack(fill=tk.BOTH, expand=True)
-        tree = ttk.Treeview(frame, columns=("user", "role", "active"), show="headings", height=11)
+        tree = self._make_scrollable_tree(
+            frame, columns=("user", "role", "active"), height=11
+        )
         for column, label, width in (("user", "Tài khoản", 160), ("role", "Vai trò", 90), ("active", "Hoạt động", 90)):
             tree.heading(column, text=label)
-            tree.column(column, width=width, anchor=tk.CENTER)
-        tree.pack(fill=tk.BOTH, expand=True)
+            tree.column(
+                column, width=width, minwidth=max(55, int(width * 0.65)),
+                anchor=tk.CENTER, stretch=True,
+            )
 
         def refresh() -> None:
             tree.delete(*tree.get_children())
@@ -2421,12 +2571,19 @@ class PlateApp(tk.Tk):
     def _build_report_page(self, parent: ttk.Frame) -> None:
         controls = ttk.Frame(parent)
         controls.pack(fill=tk.X)
-        ttk.Label(controls, text="Từ ngày").pack(side=tk.LEFT)
+        controls.columnconfigure(0, weight=1)
+        range_controls = ttk.Frame(controls)
+        range_controls.grid(row=0, column=0, sticky="ew")
+        ttk.Label(range_controls, text="Từ ngày").pack(side=tk.LEFT)
         self.report_start_var = tk.StringVar()
-        ttk.Entry(controls, textvariable=self.report_start_var, width=11).pack(side=tk.LEFT, padx=(4, 8))
-        ttk.Label(controls, text="đến").pack(side=tk.LEFT)
+        ttk.Entry(range_controls, textvariable=self.report_start_var, width=11).pack(
+            side=tk.LEFT, padx=(4, 8)
+        )
+        ttk.Label(range_controls, text="đến").pack(side=tk.LEFT)
         self.report_end_var = tk.StringVar()
-        ttk.Entry(controls, textvariable=self.report_end_var, width=11).pack(side=tk.LEFT, padx=(4, 12))
+        ttk.Entry(range_controls, textvariable=self.report_end_var, width=11).pack(
+            side=tk.LEFT, padx=(4, 12)
+        )
         for text, factory in (
             ("Hôm nay", analytics.DateRange.today_only),
             ("7 ngày", lambda: analytics.DateRange.last_days(7)),
@@ -2434,20 +2591,33 @@ class PlateApp(tk.Tk):
             ("Tháng này", analytics.DateRange.this_month),
         ):
             ttk.Button(
-                controls,
+                range_controls,
                 text=text,
                 command=lambda chosen=factory: self._set_report_range(chosen()),
             ).pack(side=tk.LEFT, padx=2)
+
+        report_actions = ttk.Frame(controls)
+        report_actions.grid(row=1, column=0, sticky="ew", pady=(4, 0))
         ttk.Button(
-            controls, text="🔄 Cập nhật", command=self._refresh_report, style="Accent.TButton"
-        ).pack(side=tk.LEFT, padx=(12, 2))
-        ttk.Button(controls, text="⬇ Xuất báo cáo CSV", command=self._export_report).pack(side=tk.LEFT, padx=2)
-        self.report_range_label = ttk.Label(controls, text="", foreground=self._palette["muted"])
+            report_actions, text="🔄 Cập nhật", command=self._refresh_report,
+            style="Accent.TButton",
+        ).pack(side=tk.LEFT, padx=(0, 2))
+        export_button = ttk.Menubutton(report_actions, text="⬇ Xuất báo cáo")
+        export_menu = tk.Menu(export_button, tearoff=False)
+        export_menu.add_command(label="Xuất CSV", command=lambda: self._export_report("csv"))
+        export_menu.add_command(label="Xuất PDF", command=lambda: self._export_report("pdf"))
+        export_button.configure(menu=export_menu)
+        export_button.pack(side=tk.LEFT, padx=2)
+        self.report_range_label = ttk.Label(
+            report_actions, text="", foreground=self._palette["muted"]
+        )
         self.report_range_label.pack(side=tk.RIGHT)
 
         tiles = ttk.Frame(parent)
         tiles.pack(fill=tk.X, pady=(10, 2))
+        self.report_tile_frame = tiles
         self.report_tiles: dict[str, StatTile] = {}
+        self.report_tile_widgets: list[StatTile] = []
         for index, (key, title, accent) in enumerate(
             (
                 ("revenue", "Doanh thu đã thu", "#1f6fe0"),
@@ -2459,9 +2629,11 @@ class PlateApp(tk.Tk):
             )
         ):
             tile = StatTile(tiles, title, accent=accent)
-            tile.grid(row=0, column=index, sticky="nsew", padx=(0 if index == 0 else 6, 0))
-            tiles.columnconfigure(index, weight=1)
             self.report_tiles[key] = tile
+            self.report_tile_widgets.append(tile)
+        self._report_tile_columns = 0
+        self._reflow_report_tiles()
+        tiles.bind("<Configure>", self._reflow_report_tiles)
 
         sub = ttk.Notebook(parent)
         sub.pack(fill=tk.BOTH, expand=True, pady=(8, 0))
@@ -2490,8 +2662,8 @@ class PlateApp(tk.Tk):
 
         shift_card = self._chart_card(bottom, "Đối soát theo nhân viên")
         shift_card.grid(row=0, column=1, sticky="nsew", padx=(4, 0))
-        self.shift_tree = ttk.Treeview(
-            shift_card, columns=("user", "method", "visits", "total"), show="headings", height=5
+        self.collection_tree = self._make_scrollable_tree(
+            shift_card, columns=("user", "method", "visits", "total"), height=5
         )
         for column, label, width in (
             ("user", "Tài khoản", 120),
@@ -2499,9 +2671,11 @@ class PlateApp(tk.Tk):
             ("visits", "Số lượt", 70),
             ("total", "Số tiền", 100),
         ):
-            self.shift_tree.heading(column, text=label)
-            self.shift_tree.column(column, width=width, anchor=tk.CENTER)
-        self.shift_tree.pack(fill=tk.BOTH, expand=True)
+            self.collection_tree.heading(column, text=label)
+            self.collection_tree.column(
+                column, width=width, minwidth=max(55, int(width * 0.65)),
+                anchor=tk.CENTER, stretch=True,
+            )
 
         # --- Lưu lượng ---
         hour_card = self._chart_card(traffic_tab, "Lưu lượng theo giờ trong ngày")
@@ -2529,15 +2703,17 @@ class PlateApp(tk.Tk):
         self.duration_chart.pack(fill=tk.BOTH, expand=True)
 
         # --- Chi tiết ---
-        detail_top = ttk.Frame(detail_tab)
-        detail_top.pack(fill=tk.BOTH, expand=True)
+        detail_host, detail_canvas, detail_content = self._make_scrollable_frame(detail_tab)
+        detail_host.pack(fill=tk.BOTH, expand=True)
+        detail_top = ttk.Frame(detail_content)
+        detail_top.pack(fill=tk.X)
         detail_top.columnconfigure(0, weight=1)
         detail_top.columnconfigure(1, weight=1)
         detail_top.rowconfigure(0, weight=1)
         top_card = self._chart_card(detail_top, "Xe ra vào nhiều nhất")
         top_card.grid(row=0, column=0, sticky="nsew", padx=(0, 4))
-        self.top_plate_tree = ttk.Treeview(
-            top_card, columns=("plate", "visits", "fee", "time"), show="headings", height=8
+        self.top_plate_tree = self._make_scrollable_tree(
+            top_card, columns=("plate", "visits", "fee", "time"), height=8
         )
         for column, label, width in (
             ("plate", "Biển số", 100),
@@ -2546,8 +2722,10 @@ class PlateApp(tk.Tk):
             ("time", "Tổng thời gian", 110),
         ):
             self.top_plate_tree.heading(column, text=label)
-            self.top_plate_tree.column(column, width=width, anchor=tk.CENTER)
-        self.top_plate_tree.pack(fill=tk.BOTH, expand=True)
+            self.top_plate_tree.column(
+                column, width=width, minwidth=max(55, int(width * 0.65)),
+                anchor=tk.CENTER, stretch=True,
+            )
 
         denied_card = self._chart_card(detail_top, "Lý do từ chối mở cổng")
         denied_card.grid(row=0, column=1, sticky="nsew", padx=(4, 0))
@@ -2556,12 +2734,11 @@ class PlateApp(tk.Tk):
         )
         self.denied_chart.pack(fill=tk.BOTH, expand=True)
 
-        shift_card = self._chart_card(detail_tab, "Ca trực & đối soát tiền mặt")
-        shift_card.pack(fill=tk.BOTH, expand=True, pady=(8, 0))
-        self.shift_tree = ttk.Treeview(
+        shift_card = self._chart_card(detail_content, "Ca trực & đối soát tiền mặt")
+        shift_card.pack(fill=tk.X, pady=(8, 0))
+        self.shift_tree = self._make_scrollable_tree(
             shift_card,
             columns=("opened", "closed", "user", "expected", "counted", "difference", "note"),
-            show="headings",
             height=6,
         )
         for column, label, width in (
@@ -2574,15 +2751,17 @@ class PlateApp(tk.Tk):
             ("note", "Ghi chú", 160),
         ):
             self.shift_tree.heading(column, text=label)
-            self.shift_tree.column(column, width=width, anchor=tk.CENTER)
+            self.shift_tree.column(
+                column, width=width, minwidth=max(60, int(width * 0.65)),
+                anchor=tk.CENTER, stretch=True,
+            )
         self.shift_tree.tag_configure("SHORT", background=self._palette["row_review"])
         self.shift_tree.tag_configure("OPEN", background=self._palette["row_in"])
-        self.shift_tree.pack(fill=tk.BOTH, expand=True)
 
-        audit_card = self._chart_card(detail_tab, "Nhật ký hệ thống")
-        audit_card.pack(fill=tk.BOTH, expand=True, pady=(8, 0))
-        self.audit_tree = ttk.Treeview(
-            audit_card, columns=("ts", "user", "action", "detail"), show="headings", height=8
+        audit_card = self._chart_card(detail_content, "Nhật ký hệ thống")
+        audit_card.pack(fill=tk.X, pady=(8, 0))
+        self.audit_tree = self._make_scrollable_tree(
+            audit_card, columns=("ts", "user", "action", "detail"), height=8
         )
         for column, label, width in (
             ("ts", "Thời gian", 150),
@@ -2591,10 +2770,54 @@ class PlateApp(tk.Tk):
             ("detail", "Chi tiết", 220),
         ):
             self.audit_tree.heading(column, text=label)
-            self.audit_tree.column(column, width=width, anchor=tk.W)
-        self.audit_tree.pack(fill=tk.BOTH, expand=True)
+            self.audit_tree.column(
+                column, width=width, minwidth=max(70, int(width * 0.65)),
+                anchor=tk.W, stretch=True,
+            )
+
+        # Keep page scrolling on the empty/card background; Treeviews retain
+        # their own wheel behaviour so long tables can be scrolled independently.
+        def scroll_detail(event) -> str:
+            if event.delta:
+                detail_canvas.yview_scroll(-1 if event.delta > 0 else 1, "units")
+            return "break"
+
+        def bind_detail_scroll(widget: tk.Misc) -> None:
+            if isinstance(widget, (ttk.Treeview, ttk.Scrollbar)):
+                return
+            widget.bind("<MouseWheel>", scroll_detail)
+            for child in widget.winfo_children():
+                bind_detail_scroll(child)
+
+        bind_detail_scroll(detail_canvas)
 
         self._set_report_range(analytics.DateRange.last_days(7), refresh=False)
+
+    def _reflow_report_tiles(self, event=None) -> None:
+        """Wrap KPI cards as the report page becomes narrower or wider."""
+        width = event.width if event is not None else self.report_tile_frame.winfo_width()
+        if width <= 1:
+            columns = 3
+        elif width >= 1180:
+            columns = 6
+        elif width >= 620:
+            columns = 3
+        else:
+            columns = 2
+        if columns == self._report_tile_columns:
+            return
+        self._report_tile_columns = columns
+        for column in range(6):
+            self.report_tile_frame.columnconfigure(column, weight=1 if column < columns else 0)
+        for index, tile in enumerate(self.report_tile_widgets):
+            row, column = divmod(index, columns)
+            tile.grid(
+                row=row,
+                column=column,
+                sticky="nsew",
+                padx=(0 if column == 0 else 6, 0),
+                pady=(0 if row == 0 else 6, 0),
+            )
 
     _DENY_REASON_LABELS = {
         "blacklist": "Danh sách đen",
@@ -2693,9 +2916,9 @@ class PlateApp(tk.Tk):
         mix = analytics.payment_mix(self.event_store, span)
         self.payment_chart.set_data([(row["method"], row["total"]) for row in mix])
 
-        self.shift_tree.delete(*self.shift_tree.get_children())
+        self.collection_tree.delete(*self.collection_tree.get_children())
         for row in analytics.collections_by_user(self.event_store, span):
-            self.shift_tree.insert(
+            self.collection_tree.insert(
                 "",
                 tk.END,
                 values=(row["user"], row["method"], row["visits"], f"{self._amount(row['total'])}đ"),
@@ -2776,22 +2999,84 @@ class PlateApp(tk.Tk):
             )
         self.status_var.set(f"Báo cáo {span.label()}")
 
-    def _export_report(self) -> None:
+    def _export_report(self, file_format: str = "csv") -> None:
         span = self._report_range()
         if span is None:
             return
+        file_format = file_format.lower()
+        if file_format not in {"csv", "pdf"}:
+            raise ValueError(f"Định dạng báo cáo không hỗ trợ: {file_format}")
+        extension = f".{file_format}"
+        format_label = file_format.upper()
         path = filedialog.asksaveasfilename(
-            title="Xuất báo cáo",
-            defaultextension=".csv",
-            initialfile=f"bao_cao_{span.start:%Y%m%d}_{span.end:%Y%m%d}.csv",
-            filetypes=[("CSV", "*.csv")],
+            title=f"Xuất báo cáo {format_label}",
+            defaultextension=extension,
+            initialfile=f"bao_cao_{span.start:%Y%m%d}_{span.end:%Y%m%d}{extension}",
+            filetypes=[(format_label, f"*{extension}")],
         )
         if not path:
             return
-        analytics.export_report(
-            self.event_store, span, Path(path), capacity=int(self.app_config.parking_capacity or 0)
+        output = Path(path)
+        if output.suffix.lower() != extension:
+            output = output.with_suffix(extension)
+        try:
+            exporter = analytics.export_report_pdf if file_format == "pdf" else analytics.export_report
+            exporter(
+                self.event_store,
+                span,
+                output,
+                capacity=int(self.app_config.parking_capacity or 0),
+            )
+        except Exception as exc:
+            messagebox.showerror("Xuất báo cáo", f"Không thể tạo file {format_label}:\n{exc}")
+            return
+        self._show_export_complete(output, f"Đã xuất báo cáo {format_label} thành công.")
+
+    def _show_export_complete(self, path: Path, detail: str = "Đã xuất file thành công.") -> None:
+        """Show the exported path and let the user launch its associated app."""
+        path = path.resolve()
+        dialog = tk.Toplevel(self)
+        dialog.title("Xuất file thành công")
+        dialog.transient(self)
+        dialog.grab_set()
+        dialog.resizable(True, False)
+
+        body = ttk.Frame(dialog, padding=18)
+        body.pack(fill=tk.BOTH, expand=True)
+        ttk.Label(body, text="✓ Xuất file thành công", font=("Segoe UI", 12, "bold")).pack(
+            anchor=tk.W
         )
-        messagebox.showinfo("Báo cáo", f"Đã xuất báo cáo:\n{path}")
+        ttk.Label(body, text=detail, foreground=self._palette["muted"]).pack(
+            anchor=tk.W, pady=(4, 10)
+        )
+        ttk.Label(body, text="Đường dẫn file:").pack(anchor=tk.W)
+        path_var = tk.StringVar(dialog, value=str(path))
+        path_entry = ttk.Entry(body, textvariable=path_var, state="readonly", width=78)
+        path_entry.pack(fill=tk.X, pady=(4, 14))
+
+        def open_file() -> None:
+            try:
+                open_with_default_app(path)
+            except OSError as exc:
+                messagebox.showerror(
+                    "Mở file", f"Không thể mở file bằng ứng dụng mặc định:\n{exc}", parent=dialog
+                )
+
+        actions = ttk.Frame(body)
+        actions.pack(fill=tk.X)
+        open_button = ttk.Button(
+            actions, text="Mở file", command=open_file, style="Accent.TButton"
+        )
+        open_button.pack(side=tk.RIGHT)
+        ttk.Button(actions, text="Đóng", command=dialog.destroy).pack(side=tk.RIGHT, padx=(0, 6))
+
+        dialog.bind("<Return>", lambda _event: open_file())
+        dialog.bind("<Escape>", lambda _event: dialog.destroy())
+        dialog.update_idletasks()
+        x = max(0, self.winfo_rootx() + (self.winfo_width() - dialog.winfo_reqwidth()) // 2)
+        y = max(0, self.winfo_rooty() + (self.winfo_height() - dialog.winfo_reqheight()) // 2)
+        dialog.geometry(f"+{x}+{y}")
+        open_button.focus_set()
 
     def _on_tab_changed(self, _event=None) -> None:
         """Recompute the report only when its tab is actually shown."""
@@ -3033,7 +3318,7 @@ class PlateApp(tk.Tk):
         )
         if path:
             count = self.event_store.export_csv(Path(path))
-            messagebox.showinfo("Export complete", f"Exported {count} events.")
+            self._show_export_complete(Path(path), f"Đã xuất {count} sự kiện CSV.")
 
     def _export_visits_csv(self) -> None:
         path = filedialog.asksaveasfilename(
@@ -3043,7 +3328,7 @@ class PlateApp(tk.Tk):
         )
         if path:
             count = self.event_store.export_visits_csv(Path(path))
-            messagebox.showinfo("Export complete", f"Exported {count} visits.")
+            self._show_export_complete(Path(path), f"Đã xuất {count} lượt gửi xe CSV.")
 
     def _clear_saved_plates(self) -> None:
         if not self._require_admin("xóa toàn bộ dữ liệu"):

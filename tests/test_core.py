@@ -371,6 +371,13 @@ class VehicleRegistryAndGateTests(unittest.TestCase):
         clock["t"] = 104.1
         self.assertFalse(gate.is_open())
 
+    def test_simulated_gate_can_be_closed_manually(self):
+        gate = SimulatedGate(open_seconds=30)
+        gate.open("manual")
+        self.assertTrue(gate.is_open())
+        gate.close("manual")
+        self.assertFalse(gate.is_open())
+
 
 class PaymentTests(unittest.TestCase):
     account = BankAccount(bank_bin="970415", account_number="0123456789", account_name="BAI XE")
@@ -403,9 +410,13 @@ class AuthTests(unittest.TestCase):
 class HardwareGateTests(unittest.TestCase):
     def test_tcp_relay_sends_command_and_swallows_errors(self):
         sent = []
-        gate = TcpRelayGate("10.0.0.1", 8000, command=b"OPEN\n", sender=sent.append)
+        gate = TcpRelayGate(
+            "10.0.0.1", 8000, command=b"OPEN\n", close_command=b"CLOSE\n",
+            sender=sent.append,
+        )
         gate.open("test")
-        self.assertEqual(sent, [b"OPEN\n"])
+        gate.close("test")
+        self.assertEqual(sent, [b"OPEN\n", b"CLOSE\n"])
 
         def boom(_):
             raise OSError("no route")
@@ -423,6 +434,9 @@ class HardwareGateTests(unittest.TestCase):
         self.assertTrue(gate.is_open())
         self.assertEqual(gate.last_plate, "59X312345")
         self.assertEqual(sent, [b"OPEN\n"])
+        gate.close("manual")
+        self.assertFalse(gate.is_open())
+        self.assertEqual(sent, [b"OPEN\n", b"CLOSE\n"])
 
     def test_build_gate_selects_backend(self):
         from plate_app.config import AppConfig
