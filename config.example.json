@@ -20,6 +20,20 @@
   "parking_flat_fee": 0,
   "parking_hourly_fee": 0,
   "parking_free_minutes": 0,
+  "parking_daily_cap": 0,
+  "parking_overnight_fee": 0,
+  "parking_night_hour": 22,
+  "parking_capacity": 0,
+  "default_vehicle_type": "MOTORBIKE",
+  "parking_tariffs": {
+    "CAR": { "flat_fee": 10000, "hourly_fee": 5000, "daily_cap": 60000 }
+  },
+  "monthly_ticket_fees": {
+    "MOTORBIKE": 100000,
+    "CAR": 800000,
+    "BICYCLE": 50000
+  },
+  "retention_days": 0,
   "gate_backend": "simulated",
   "gate_host": "",
   "gate_port": 8000,
@@ -27,6 +41,9 @@
   "bank_bin": "",
   "bank_account": "",
   "bank_account_name": "",
+  "payment_provider": "none",
+  "payment_api_token": "",
+  "payment_poll_seconds": 20,
   "require_login": false,
   "auto_start": false,
   "camera_alert_seconds": 6.0,

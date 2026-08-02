@@ -1,12 +1,13 @@
 from __future__ import annotations
 
+import calendar
 import csv
 import re
 import sqlite3
 import threading
 from contextlib import contextmanager
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Iterator
 
@@ -15,10 +16,13 @@ import cv2
 from .auth import ROLE_ADMIN, ROLE_OPERATOR, User, hash_password, verify_password
 from .parking import (
     ALLOW,
+    MOTORBIKE,
     POLICY_ALL,
     RegisteredVehicle,
     Tariff,
+    TariffTable,
     decide_access,
+    normalize_vehicle_type,
 )
 
 
@@ -35,6 +39,7 @@ class PlateEvent:
     visit_id: int | None = None
     access_status: str = "UNKNOWN"
     access_reason: str = ""
+    source: str = "AUTO"  # AUTO (camera) | MANUAL (typed in by the operator)
 
 
 @dataclass(frozen=True)
@@ -53,6 +58,12 @@ class VehicleVisit:
     payment_status: str = "UNPAID"
     payment_method: str | None = None
     paid_at: str | None = None
+    vehicle_type: str = MOTORBIKE
+    review_flag: str = ""       # why this visit needs a human look ("" = clean)
+    collected_by: str | None = None
+    shift_id: int | None = None
+    note: str = ""
+    payment_reference: str = ""
     entry_camera_name: str | None = None
     exit_camera_name: str | None = None
 
@@ -63,6 +74,8 @@ class EventStore:
         data_dir: Path,
         policy: str = POLICY_ALL,
         tariff: Tariff | None = None,
+        tariff_table: TariffTable | None = None,
+        default_vehicle_type: str = MOTORBIKE,
     ):
         self.data_dir = data_dir
         self.snapshot_dir = data_dir / "snapshots"
@@ -71,12 +84,30 @@ class EventStore:
         self._lock = threading.Lock()
         self.policy = policy
         self.tariff = tariff or Tariff()
+        self.tariff_table = tariff_table or TariffTable(default=self.tariff)
+        self.default_vehicle_type = normalize_vehicle_type(default_vehicle_type)
+        # Thresholds that decide when a completed visit is flagged for a human.
+        self.low_confidence = 0.6
+        self.min_visit_seconds = 30
         self._initialize()
 
-    def configure_rules(self, policy: str, tariff: Tariff) -> None:
+    def configure_rules(
+        self,
+        policy: str,
+        tariff: Tariff,
+        tariff_table: TariffTable | None = None,
+        default_vehicle_type: str | None = None,
+    ) -> None:
         """Update gate policy and price list without reopening the store."""
         self.policy = policy
         self.tariff = tariff
+        self.tariff_table = tariff_table or TariffTable(default=tariff)
+        if default_vehicle_type:
+            self.default_vehicle_type = normalize_vehicle_type(default_vehicle_type)
+
+    def open_connection(self):
+        """Read access for the reporting layer (see `plate_app.analytics`)."""
+        return self._connect()
 
     @contextmanager
     def _connect(self) -> Iterator[sqlite3.Connection]:
@@ -122,6 +153,10 @@ class EventStore:
             if "access_reason" not in columns:
                 connection.execute(
                     "ALTER TABLE plate_events ADD COLUMN access_reason TEXT NOT NULL DEFAULT ''"
+                )
+            if "source" not in columns:
+                connection.execute(
+                    "ALTER TABLE plate_events ADD COLUMN source TEXT NOT NULL DEFAULT 'AUTO'"
                 )
             connection.execute(
                 """
@@ -176,6 +211,32 @@ class EventStore:
                 connection.execute("ALTER TABLE vehicle_visits ADD COLUMN payment_method TEXT")
             if "paid_at" not in visit_columns:
                 connection.execute("ALTER TABLE vehicle_visits ADD COLUMN paid_at TEXT")
+            if "vehicle_type" not in visit_columns:
+                connection.execute(
+                    "ALTER TABLE vehicle_visits ADD COLUMN vehicle_type TEXT NOT NULL "
+                    "DEFAULT 'MOTORBIKE'"
+                )
+            if "review_flag" not in visit_columns:
+                connection.execute(
+                    "ALTER TABLE vehicle_visits ADD COLUMN review_flag TEXT NOT NULL DEFAULT ''"
+                )
+            if "collected_by" not in visit_columns:
+                connection.execute("ALTER TABLE vehicle_visits ADD COLUMN collected_by TEXT")
+            if "shift_id" not in visit_columns:
+                connection.execute("ALTER TABLE vehicle_visits ADD COLUMN shift_id INTEGER")
+            if "note" not in visit_columns:
+                connection.execute(
+                    "ALTER TABLE vehicle_visits ADD COLUMN note TEXT NOT NULL DEFAULT ''"
+                )
+            if "payment_reference" not in visit_columns:
+                connection.execute(
+                    "ALTER TABLE vehicle_visits ADD COLUMN payment_reference TEXT NOT NULL "
+                    "DEFAULT ''"
+                )
+            connection.execute(
+                "CREATE TABLE IF NOT EXISTS app_state ("
+                "key TEXT PRIMARY KEY, value TEXT NOT NULL)"
+            )
             connection.execute(
                 """
                 CREATE TABLE IF NOT EXISTS registered_vehicles (
@@ -190,6 +251,55 @@ class EventStore:
                     updated_at TEXT NOT NULL
                 )
                 """
+            )
+            vehicle_columns = {
+                row["name"]
+                for row in connection.execute(
+                    "PRAGMA table_info(registered_vehicles)"
+                ).fetchall()
+            }
+            if vehicle_columns and "vehicle_type" not in vehicle_columns:
+                connection.execute(
+                    "ALTER TABLE registered_vehicles ADD COLUMN vehicle_type TEXT NOT NULL "
+                    "DEFAULT 'MOTORBIKE'"
+                )
+            if vehicle_columns and "phone" not in vehicle_columns:
+                connection.execute(
+                    "ALTER TABLE registered_vehicles ADD COLUMN phone TEXT NOT NULL DEFAULT ''"
+                )
+            connection.execute(
+                """
+                CREATE TABLE IF NOT EXISTS shifts (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    username TEXT NOT NULL,
+                    opened_at TEXT NOT NULL,
+                    closed_at TEXT,
+                    opening_cash REAL NOT NULL DEFAULT 0,
+                    counted_cash REAL,
+                    expected_cash REAL,
+                    note TEXT NOT NULL DEFAULT ''
+                )
+                """
+            )
+            connection.execute(
+                """
+                CREATE TABLE IF NOT EXISTS subscriptions (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    plate TEXT NOT NULL,
+                    vehicle_type TEXT NOT NULL DEFAULT 'MOTORBIKE',
+                    months INTEGER NOT NULL DEFAULT 1,
+                    amount REAL NOT NULL DEFAULT 0,
+                    valid_from TEXT NOT NULL,
+                    valid_until TEXT NOT NULL,
+                    paid_at TEXT NOT NULL,
+                    created_by TEXT,
+                    shift_id INTEGER
+                )
+                """
+            )
+            connection.execute(
+                "CREATE INDEX IF NOT EXISTS idx_subscriptions_plate "
+                "ON subscriptions(plate, paid_at)"
             )
             connection.execute(
                 """
@@ -284,34 +394,47 @@ class EventStore:
         frame,
         detected_at: datetime | None = None,
         direction: str = "IN",
+        source: str = "AUTO",
+        vehicle_type: str | None = None,
     ) -> PlateEvent:
         detected_at = detected_at or datetime.now().astimezone()
         direction = self._normalize_direction(direction)
-        safe_time = detected_at.strftime("%Y%m%d_%H%M%S_%f")
-        safe_camera = "".join(c if c.isalnum() or c in "-_" else "_" for c in camera_id)
-        snapshot = self.snapshot_dir / f"{safe_time}_{safe_camera}_{plate}.jpg"
-        if not cv2.imwrite(str(snapshot), frame):
-            snapshot = Path("")
+        snapshot = Path("")
+        if frame is not None:
+            safe_time = detected_at.strftime("%Y%m%d_%H%M%S_%f")
+            safe_camera = "".join(c if c.isalnum() or c in "-_" else "_" for c in camera_id)
+            candidate = self.snapshot_dir / f"{safe_time}_{safe_camera}_{plate}.jpg"
+            if cv2.imwrite(str(candidate), frame):
+                snapshot = candidate
 
+        snapshot_path = str(snapshot) if snapshot.name else ""
         timestamp = detected_at.isoformat(timespec="milliseconds")
         with self._lock, self._connect() as connection:
             vehicle = self._find_vehicle(connection, plate)
             decision = decide_access(vehicle, self.policy, detected_at)
+            # A registered vehicle knows its own class; otherwise fall back to
+            # the class the operator picked for this site.
+            resolved_type = normalize_vehicle_type(
+                vehicle_type or (vehicle.vehicle_type if vehicle else None),
+                default=self.default_vehicle_type,
+            )
             cursor = connection.execute(
                 """
                 INSERT INTO plate_events
                     (camera_id, camera_name, plate, confidence, detected_at,
-                     snapshot_path, direction, access_status, access_reason)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                     snapshot_path, direction, access_status, access_reason, source)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     camera_id, camera_name, plate, confidence, timestamp,
-                    str(snapshot), direction, decision.status, decision.reason,
+                    snapshot_path, direction, decision.status, decision.reason,
+                    "MANUAL" if source == "MANUAL" else "AUTO",
                 ),
             )
             event_id = int(cursor.lastrowid)
             visit_id = self._pair_visit(
-                connection, event_id, plate, direction, timestamp, decision.status
+                connection, event_id, plate, direction, timestamp, decision.status,
+                vehicle_type=resolved_type, confidence=confidence,
             )
         return PlateEvent(
             id=event_id,
@@ -320,12 +443,47 @@ class EventStore:
             plate=plate,
             confidence=confidence,
             detected_at=timestamp,
-            snapshot_path=str(snapshot),
+            snapshot_path=snapshot_path,
             direction=direction,
             visit_id=visit_id,
             access_status=decision.status,
             access_reason=decision.reason,
+            source="MANUAL" if source == "MANUAL" else "AUTO",
         )
+
+    def record_manual(
+        self,
+        plate: str,
+        direction: str,
+        username: str | None = None,
+        vehicle_type: str | None = None,
+        camera_name: str = "Thủ công",
+        note: str = "",
+    ) -> PlateEvent:
+        """Log an entry/exit typed in by the operator.
+
+        Needed whenever the camera missed the vehicle: a lost ticket, a plate
+        the OCR cannot read, or a vehicle waved through by hand.
+        """
+        plate = self._normalize_plate(plate)
+        if not plate:
+            raise ValueError("Biển số không được trống")
+        event = self.record(
+            camera_id="manual",
+            camera_name=camera_name,
+            plate=plate,
+            confidence=1.0,
+            frame=None,
+            direction=direction,
+            source="MANUAL",
+            vehicle_type=vehicle_type,
+        )
+        if event.visit_id:
+            self._flag_visit(event.visit_id, "manual", note=note)
+        self.write_audit(
+            username, f"MANUAL_{event.direction}", f"{plate} {note}".strip()
+        )
+        return event
 
     def _pair_visit(
         self,
@@ -335,10 +493,13 @@ class EventStore:
         direction: str,
         timestamp: str,
         access_status: str = "UNKNOWN",
+        vehicle_type: str | None = None,
+        confidence: float = 1.0,
     ) -> int:
+        vehicle_type = normalize_vehicle_type(vehicle_type, default=self.default_vehicle_type)
         open_visit = connection.execute(
             """
-            SELECT id, entry_at FROM vehicle_visits
+            SELECT id, entry_at, vehicle_type FROM vehicle_visits
             WHERE plate = ? AND status = 'INSIDE'
             ORDER BY id DESC LIMIT 1
             """,
@@ -349,10 +510,11 @@ class EventStore:
                 cursor = connection.execute(
                     """
                     INSERT INTO vehicle_visits
-                        (plate, entry_event_id, entry_at, status, created_at, updated_at)
-                    VALUES (?, ?, ?, 'INSIDE', ?, ?)
+                        (plate, entry_event_id, entry_at, status, vehicle_type,
+                         created_at, updated_at)
+                    VALUES (?, ?, ?, 'INSIDE', ?, ?, ?)
                     """,
-                    (plate, event_id, timestamp, timestamp, timestamp),
+                    (plate, event_id, timestamp, vehicle_type, timestamp, timestamp),
                 )
                 visit_id = int(cursor.lastrowid)
             else:
@@ -361,7 +523,10 @@ class EventStore:
             entry_at = datetime.fromisoformat(open_visit["entry_at"])
             exit_at = datetime.fromisoformat(timestamp)
             duration = max(0, round((exit_at - entry_at).total_seconds()))
-            fee = self.tariff.fee_for(duration)
+            visit_type = normalize_vehicle_type(
+                open_visit["vehicle_type"], default=vehicle_type
+            )
+            fee = self.tariff_table.fee_for_period(visit_type, entry_at, exit_at, duration)
             # Registered vehicles (subscribers) and zero-fee visits pass free;
             # a paying guest owes money until the operator collects it.
             payment_status = "EXEMPT" if access_status == ALLOW or fee <= 0 else "UNPAID"
@@ -370,19 +535,25 @@ class EventStore:
                 """
                 UPDATE vehicle_visits
                 SET exit_event_id = ?, exit_at = ?, status = 'COMPLETED',
-                    duration_seconds = ?, fee = ?, payment_status = ?, updated_at = ?
+                    duration_seconds = ?, fee = ?, payment_status = ?,
+                    review_flag = ?, updated_at = ?
                 WHERE id = ?
                 """,
-                (event_id, timestamp, duration, fee, payment_status, timestamp, visit_id),
+                (
+                    event_id, timestamp, duration, fee, payment_status,
+                    self._exit_review_flag(connection, open_visit["id"], duration, confidence),
+                    timestamp, visit_id,
+                ),
             )
         else:
             cursor = connection.execute(
                 """
                 INSERT INTO vehicle_visits
-                    (plate, exit_event_id, exit_at, status, created_at, updated_at)
-                VALUES (?, ?, ?, 'REVIEW', ?, ?)
+                    (plate, exit_event_id, exit_at, status, vehicle_type, review_flag,
+                     created_at, updated_at)
+                VALUES (?, ?, ?, 'REVIEW', ?, 'no_entry', ?, ?)
                 """,
-                (plate, event_id, timestamp, timestamp, timestamp),
+                (plate, event_id, timestamp, vehicle_type, timestamp, timestamp),
             )
             visit_id = int(cursor.lastrowid)
         connection.execute(
@@ -390,6 +561,162 @@ class EventStore:
             (visit_id, event_id),
         )
         return visit_id
+
+    # --- Reconciliation (đối soát vào/ra) ---
+
+    def _exit_review_flag(
+        self,
+        connection: sqlite3.Connection,
+        visit_id: int,
+        duration: int,
+        exit_confidence: float,
+    ) -> str:
+        """Reasons a completed visit deserves a look at the two snapshots.
+
+        The plates already match (that is how the visit was paired), so what is
+        left to catch is a weak read on either end or a stay too short to be a
+        real one — the shapes a swapped vehicle usually takes.
+        """
+        reasons: list[str] = []
+        row = connection.execute(
+            """
+            SELECT entry_event.confidence AS entry_confidence,
+                   entry_event.source AS entry_source,
+                   visits.review_flag AS review_flag
+            FROM vehicle_visits AS visits
+            LEFT JOIN plate_events AS entry_event ON entry_event.id = visits.entry_event_id
+            WHERE visits.id = ?
+            """,
+            (visit_id,),
+        ).fetchone()
+        entry_confidence = float(row["entry_confidence"] or 1.0) if row else 1.0
+        if min(entry_confidence, float(exit_confidence)) < self.low_confidence:
+            reasons.append("low_confidence")
+        if duration < self.min_visit_seconds:
+            reasons.append("short_stay")
+        if row and row["entry_source"] == "MANUAL":
+            reasons.append("manual")
+        previous = (row["review_flag"] if row else "") or ""
+        for reason in previous.split(","):
+            if reason and reason not in reasons:
+                reasons.append(reason)
+        return ",".join(reasons)
+
+    def _flag_visit(self, visit_id: int, reason: str, note: str = "") -> None:
+        with self._lock, self._connect() as connection:
+            row = connection.execute(
+                "SELECT review_flag, note FROM vehicle_visits WHERE id = ?", (visit_id,)
+            ).fetchone()
+            if row is None:
+                return
+            flags = [item for item in (row["review_flag"] or "").split(",") if item]
+            if reason and reason not in flags:
+                flags.append(reason)
+            note_text = " ".join(filter(None, [(row["note"] or "").strip(), note.strip()]))
+            connection.execute(
+                "UPDATE vehicle_visits SET review_flag = ?, note = ? WHERE id = ?",
+                (",".join(flags), note_text, visit_id),
+            )
+
+    def clear_visit_flag(self, visit_id: int, username: str | None = None) -> int:
+        """Operator confirmed the vehicle is the right one."""
+        now = datetime.now().astimezone().isoformat(timespec="milliseconds")
+        with self._lock, self._connect() as connection:
+            cursor = connection.execute(
+                "UPDATE vehicle_visits SET review_flag = '', updated_at = ? WHERE id = ?",
+                (now, visit_id),
+            )
+        if cursor.rowcount:
+            self.write_audit(username, "VISIT_VERIFIED", str(visit_id))
+        return cursor.rowcount
+
+    def visit_detail(self, visit_id: int) -> dict | None:
+        """The visit plus both snapshots, for the entry/exit comparison window."""
+        with self._connect() as connection:
+            visit = connection.execute(
+                "SELECT * FROM vehicle_visits WHERE id = ?", (visit_id,)
+            ).fetchone()
+            if visit is None:
+                return None
+            events = {}
+            for key, column in (("entry", "entry_event_id"), ("exit", "exit_event_id")):
+                event_id = visit[column]
+                if not event_id:
+                    events[key] = None
+                    continue
+                row = connection.execute(
+                    "SELECT * FROM plate_events WHERE id = ?", (event_id,)
+                ).fetchone()
+                events[key] = dict(row) if row is not None else None
+        detail = dict(visit)
+        detail["entry_event"] = events["entry"]
+        detail["exit_event"] = events["exit"]
+        return detail
+
+    def update_visit_plate(
+        self, visit_id: int, new_plate: str, username: str | None = None
+    ) -> str:
+        """Correct a misread plate on a visit and both of its events."""
+        plate = self._normalize_plate(new_plate)
+        if not plate:
+            raise ValueError("Biển số không được trống")
+        now = datetime.now().astimezone().isoformat(timespec="milliseconds")
+        with self._lock, self._connect() as connection:
+            row = connection.execute(
+                "SELECT plate, status FROM vehicle_visits WHERE id = ?", (visit_id,)
+            ).fetchone()
+            if row is None:
+                raise ValueError(f"Không tìm thấy lượt {visit_id}")
+            if plate != row["plate"] and row["status"] == "INSIDE":
+                clash = connection.execute(
+                    "SELECT id FROM vehicle_visits WHERE plate = ? AND status = 'INSIDE'",
+                    (plate,),
+                ).fetchone()
+                if clash is not None:
+                    raise ValueError(f"Biển {plate} đang có lượt trong bãi")
+            connection.execute(
+                "UPDATE vehicle_visits SET plate = ?, updated_at = ? WHERE id = ?",
+                (plate, now, visit_id),
+            )
+            connection.execute(
+                "UPDATE plate_events SET plate = ? WHERE visit_id = ?", (plate, visit_id)
+            )
+            old_plate = row["plate"]
+        self.write_audit(username, "PLATE_CORRECTED", f"{old_plate} -> {plate}")
+        return plate
+
+    def set_visit_vehicle_type(
+        self, visit_id: int, vehicle_type: str, username: str | None = None
+    ) -> float | None:
+        """Reclassify a visit; recompute the fee when it has already left."""
+        vehicle_type = normalize_vehicle_type(vehicle_type, default=self.default_vehicle_type)
+        now = datetime.now().astimezone().isoformat(timespec="milliseconds")
+        with self._lock, self._connect() as connection:
+            row = connection.execute(
+                "SELECT * FROM vehicle_visits WHERE id = ?", (visit_id,)
+            ).fetchone()
+            if row is None:
+                raise ValueError(f"Không tìm thấy lượt {visit_id}")
+            fee = row["fee"]
+            if row["status"] == "COMPLETED" and row["payment_status"] != "PAID":
+                entry_at = datetime.fromisoformat(row["entry_at"]) if row["entry_at"] else None
+                exit_at = datetime.fromisoformat(row["exit_at"]) if row["exit_at"] else None
+                fee = self.tariff_table.fee_for_period(
+                    vehicle_type, entry_at, exit_at, row["duration_seconds"]
+                )
+                payment_status = "EXEMPT" if fee <= 0 else row["payment_status"]
+                connection.execute(
+                    "UPDATE vehicle_visits SET vehicle_type = ?, fee = ?, payment_status = ?, "
+                    "updated_at = ? WHERE id = ?",
+                    (vehicle_type, fee, payment_status, now, visit_id),
+                )
+            else:
+                connection.execute(
+                    "UPDATE vehicle_visits SET vehicle_type = ?, updated_at = ? WHERE id = ?",
+                    (vehicle_type, now, visit_id),
+                )
+        self.write_audit(username, "VISIT_RETYPED", f"{visit_id} {vehicle_type}")
+        return fee
 
     def latest(self, limit: int = 100) -> list[PlateEvent]:
         with self._connect() as connection:
@@ -418,6 +745,8 @@ class EventStore:
             valid_from=row["valid_from"],
             valid_until=row["valid_until"],
             active=bool(row["active"]),
+            vehicle_type=normalize_vehicle_type(row["vehicle_type"]),
+            phone=row["phone"] or "",
         )
 
     def _find_vehicle(self, connection: sqlite3.Connection, plate: str) -> RegisteredVehicle | None:
@@ -451,8 +780,8 @@ class EventStore:
                 """
                 INSERT INTO registered_vehicles
                     (plate, owner_name, access, note, valid_from, valid_until,
-                     active, created_at, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                     active, vehicle_type, phone, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(plate) DO UPDATE SET
                     owner_name = excluded.owner_name,
                     access = excluded.access,
@@ -460,12 +789,15 @@ class EventStore:
                     valid_from = excluded.valid_from,
                     valid_until = excluded.valid_until,
                     active = excluded.active,
+                    vehicle_type = excluded.vehicle_type,
+                    phone = excluded.phone,
                     updated_at = excluded.updated_at
                 """,
                 (
                     plate, vehicle.owner_name, access, vehicle.note,
                     vehicle.valid_from or None, vehicle.valid_until or None,
-                    int(vehicle.active), now, now,
+                    int(vehicle.active), normalize_vehicle_type(vehicle.vehicle_type),
+                    vehicle.phone, now, now,
                 ),
             )
         return plate
@@ -616,18 +948,54 @@ class EventStore:
             ).fetchall()
         return [VehicleVisit(**dict(row)) for row in rows]
 
-    def mark_paid(self, visit_id: int, method: str = "CASH") -> int:
+    def mark_paid(
+        self,
+        visit_id: int,
+        method: str = "CASH",
+        username: str | None = None,
+        shift_id: int | None = None,
+        reference: str = "",
+    ) -> int:
         now = datetime.now().astimezone().isoformat(timespec="milliseconds")
         with self._lock, self._connect() as connection:
             cursor = connection.execute(
                 """
                 UPDATE vehicle_visits
-                SET payment_status = 'PAID', payment_method = ?, paid_at = ?, updated_at = ?
-                WHERE id = ? AND status = 'COMPLETED'
+                SET payment_status = 'PAID', payment_method = ?, paid_at = ?,
+                    collected_by = ?, shift_id = ?, payment_reference = ?, updated_at = ?
+                WHERE id = ? AND status = 'COMPLETED' AND payment_status != 'PAID'
                 """,
-                (method, now, now, visit_id),
+                (method, now, username, shift_id, reference, now, visit_id),
             )
             return cursor.rowcount
+
+    def pending_payments(self, limit: int = 200) -> dict[int, float]:
+        """Visits waiting for money: visit id -> amount owed."""
+        with self._connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT id, COALESCE(fee, 0) AS fee FROM vehicle_visits
+                WHERE status = 'COMPLETED' AND payment_status = 'UNPAID' AND COALESCE(fee, 0) > 0
+                ORDER BY id DESC LIMIT ?
+                """,
+                (limit,),
+            ).fetchall()
+        return {int(row["id"]): float(row["fee"]) for row in rows}
+
+    def get_state(self, key: str, default: str = "") -> str:
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT value FROM app_state WHERE key = ?", (key,)
+            ).fetchone()
+        return row["value"] if row is not None else default
+
+    def set_state(self, key: str, value: str) -> None:
+        with self._lock, self._connect() as connection:
+            connection.execute(
+                "INSERT INTO app_state (key, value) VALUES (?, ?) "
+                "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                (key, str(value)),
+            )
 
     def revenue_summary(self, since: str | None = None) -> dict[str, float]:
         query = (
@@ -649,6 +1017,260 @@ class EventStore:
                 summary["unpaid_total"] += row["fee"]
                 summary["unpaid_count"] += 1
         return summary
+
+    # --- Monthly passes (vé tháng) ---
+
+    @staticmethod
+    def _add_months(start: date, months: int) -> date:
+        """One month later means the same day-of-month, clamped to month length."""
+        month_index = start.month - 1 + max(1, int(months))
+        year = start.year + month_index // 12
+        month = month_index % 12 + 1
+        day = min(start.day, calendar.monthrange(year, month)[1])
+        return date(year, month, day)
+
+    def add_subscription(
+        self,
+        plate: str,
+        months: int = 1,
+        amount: float = 0.0,
+        vehicle_type: str | None = None,
+        owner_name: str = "",
+        phone: str = "",
+        note: str = "",
+        username: str | None = None,
+        shift_id: int | None = None,
+        today: date | None = None,
+    ) -> RegisteredVehicle:
+        """Sell or renew a monthly pass; extends the whitelist entry in place."""
+        plate = self._normalize_plate(plate)
+        if not plate:
+            raise ValueError("Biển số không được trống")
+        months = max(1, int(months))
+        today = today or date.today()
+        existing = self.find_vehicle(plate)
+        vehicle_type = normalize_vehicle_type(
+            vehicle_type or (existing.vehicle_type if existing else None),
+            default=self.default_vehicle_type,
+        )
+        # Renewing early stacks onto the remaining days instead of losing them.
+        start = today
+        if existing and existing.valid_until:
+            current_end = date.fromisoformat(existing.valid_until[:10])
+            if current_end >= today:
+                start = current_end + timedelta(days=1)
+        valid_until = self._add_months(start, months) - timedelta(days=1)
+        vehicle = RegisteredVehicle(
+            plate=plate,
+            owner_name=owner_name or (existing.owner_name if existing else ""),
+            access=ALLOW,
+            note=note or (existing.note if existing else ""),
+            valid_from=(existing.valid_from if existing and existing.valid_from else today.isoformat()),
+            valid_until=valid_until.isoformat(),
+            active=True,
+            vehicle_type=vehicle_type,
+            phone=phone or (existing.phone if existing else ""),
+        )
+        self.upsert_vehicle(vehicle)
+        now = datetime.now().astimezone().isoformat(timespec="milliseconds")
+        with self._lock, self._connect() as connection:
+            connection.execute(
+                """
+                INSERT INTO subscriptions
+                    (plate, vehicle_type, months, amount, valid_from, valid_until,
+                     paid_at, created_by, shift_id)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    plate, vehicle_type, months, float(amount), start.isoformat(),
+                    valid_until.isoformat(), now, username, shift_id,
+                ),
+            )
+        self.write_audit(username, "SUBSCRIPTION", f"{plate} {months}m {round(float(amount))}")
+        return vehicle
+
+    def list_subscriptions(self, limit: int = 200) -> list[dict]:
+        with self._connect() as connection:
+            rows = connection.execute(
+                "SELECT * FROM subscriptions ORDER BY id DESC LIMIT ?", (limit,)
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def subscription_revenue(self, since: str | None = None) -> dict[str, float]:
+        query = "SELECT COUNT(*) AS tickets, COALESCE(SUM(amount), 0) AS total FROM subscriptions"
+        parameters: tuple = ()
+        if since:
+            query += " WHERE paid_at >= ?"
+            parameters = (since,)
+        with self._connect() as connection:
+            row = connection.execute(query, parameters).fetchone()
+        return {"tickets": int(row["tickets"]), "total": float(row["total"])}
+
+    def expiring_vehicles(self, days: int = 7, today: date | None = None) -> list[RegisteredVehicle]:
+        """Passes that expire within `days` (negative days_left = already expired)."""
+        today = today or date.today()
+        limit = (today + timedelta(days=max(0, int(days)))).isoformat()
+        with self._connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT * FROM registered_vehicles
+                WHERE access = 'ALLOW' AND active = 1
+                  AND valid_until IS NOT NULL AND valid_until <= ?
+                ORDER BY valid_until
+                """,
+                (limit,),
+            ).fetchall()
+        return [self._row_to_vehicle(row) for row in rows]
+
+    # --- Shifts and end-of-shift cash reconciliation (ca trực) ---
+
+    def current_shift(self) -> dict | None:
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT * FROM shifts WHERE closed_at IS NULL ORDER BY id DESC LIMIT 1"
+            ).fetchone()
+        return dict(row) if row is not None else None
+
+    def open_shift(self, username: str | None, opening_cash: float = 0.0) -> dict:
+        if self.current_shift() is not None:
+            raise ValueError("Đang có ca trực chưa đóng")
+        now = datetime.now().astimezone().isoformat(timespec="milliseconds")
+        with self._lock, self._connect() as connection:
+            cursor = connection.execute(
+                "INSERT INTO shifts (username, opened_at, opening_cash) VALUES (?, ?, ?)",
+                (username or "", now, float(opening_cash)),
+            )
+            shift_id = int(cursor.lastrowid)
+        self.write_audit(username, "SHIFT_OPEN", f"{shift_id} {round(float(opening_cash))}")
+        return self.shift(shift_id)
+
+    def shift(self, shift_id: int) -> dict:
+        with self._connect() as connection:
+            row = connection.execute("SELECT * FROM shifts WHERE id = ?", (shift_id,)).fetchone()
+        if row is None:
+            raise ValueError(f"Không tìm thấy ca {shift_id}")
+        return dict(row)
+
+    def shift_totals(self, shift_id: int) -> dict[str, float]:
+        """What the shift took in, split by payment method."""
+        with self._connect() as connection:
+            visits = connection.execute(
+                """
+                SELECT payment_method, COUNT(*) AS visits, COALESCE(SUM(fee), 0) AS total
+                FROM vehicle_visits
+                WHERE shift_id = ? AND payment_status = 'PAID'
+                GROUP BY payment_method
+                """,
+                (shift_id,),
+            ).fetchall()
+            subs = connection.execute(
+                "SELECT COUNT(*) AS tickets, COALESCE(SUM(amount), 0) AS total "
+                "FROM subscriptions WHERE shift_id = ?",
+                (shift_id,),
+            ).fetchone()
+            opening = connection.execute(
+                "SELECT opening_cash FROM shifts WHERE id = ?", (shift_id,)
+            ).fetchone()
+        totals = {
+            "cash_total": 0.0, "cash_visits": 0,
+            "qr_total": 0.0, "qr_visits": 0,
+            "subscription_total": float(subs["total"]), "subscription_tickets": int(subs["tickets"]),
+            "opening_cash": float(opening["opening_cash"]) if opening else 0.0,
+        }
+        for row in visits:
+            prefix = "qr" if (row["payment_method"] or "CASH").upper() == "QR" else "cash"
+            totals[f"{prefix}_total"] += float(row["total"])
+            totals[f"{prefix}_visits"] += int(row["visits"])
+        # Monthly passes are assumed to be paid in cash at the booth.
+        totals["expected_cash"] = (
+            totals["opening_cash"] + totals["cash_total"] + totals["subscription_total"]
+        )
+        totals["collected_total"] = (
+            totals["cash_total"] + totals["qr_total"] + totals["subscription_total"]
+        )
+        return totals
+
+    def close_shift(
+        self, shift_id: int, counted_cash: float, note: str = "", username: str | None = None
+    ) -> dict:
+        totals = self.shift_totals(shift_id)
+        now = datetime.now().astimezone().isoformat(timespec="milliseconds")
+        with self._lock, self._connect() as connection:
+            connection.execute(
+                "UPDATE shifts SET closed_at = ?, counted_cash = ?, expected_cash = ?, note = ? "
+                "WHERE id = ? AND closed_at IS NULL",
+                (now, float(counted_cash), totals["expected_cash"], note, shift_id),
+            )
+        difference = float(counted_cash) - totals["expected_cash"]
+        self.write_audit(
+            username, "SHIFT_CLOSE",
+            f"{shift_id} thu={round(totals['expected_cash'])} đếm={round(float(counted_cash))} "
+            f"lệch={round(difference)}",
+        )
+        result = dict(totals)
+        result.update(self.shift(shift_id))
+        result["difference"] = difference
+        return result
+
+    def list_shifts(self, limit: int = 50) -> list[dict]:
+        with self._connect() as connection:
+            rows = connection.execute(
+                "SELECT * FROM shifts ORDER BY id DESC LIMIT ?", (limit,)
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    # --- Data retention ---
+
+    def purge_older_than(self, days: int, username: str | None = None) -> dict[str, int]:
+        """Delete visits, events and snapshots older than `days`.
+
+        Vehicles still inside are never touched, however old their entry is.
+        """
+        days = int(days)
+        if days <= 0:
+            return {"visits": 0, "events": 0, "snapshots": 0}
+        cutoff = (datetime.now().astimezone() - timedelta(days=days)).isoformat(
+            timespec="milliseconds"
+        )
+        with self._lock, self._connect() as connection:
+            visits = connection.execute(
+                "DELETE FROM vehicle_visits WHERE status != 'INSIDE' "
+                "AND COALESCE(exit_at, created_at) < ?",
+                (cutoff,),
+            ).rowcount
+            doomed = connection.execute(
+                """
+                SELECT id, snapshot_path FROM plate_events
+                WHERE detected_at < ?
+                  AND id NOT IN (
+                      SELECT entry_event_id FROM vehicle_visits WHERE entry_event_id IS NOT NULL
+                      UNION
+                      SELECT exit_event_id FROM vehicle_visits WHERE exit_event_id IS NOT NULL
+                  )
+                """,
+                (cutoff,),
+            ).fetchall()
+            removed_files = 0
+            for row in doomed:
+                path = Path(row["snapshot_path"] or "")
+                if path.name and path.exists():
+                    try:
+                        path.unlink()
+                        removed_files += 1
+                    except OSError:
+                        pass
+            if doomed:
+                connection.executemany(
+                    "DELETE FROM plate_events WHERE id = ?",
+                    [(row["id"],) for row in doomed],
+                )
+        result = {"visits": visits, "events": len(doomed), "snapshots": removed_files}
+        if result["visits"] or result["events"]:
+            self.write_audit(
+                username, "PURGE",
+                f"{days}d visits={result['visits']} events={result['events']}",
+            )
+        return result
 
     def export_csv(self, output_path: Path) -> int:
         with self._connect() as connection:

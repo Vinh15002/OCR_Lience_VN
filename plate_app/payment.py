@@ -36,6 +36,32 @@ class BankAccount:
     def is_configured(self) -> bool:
         return bool(self.bank_bin and self.account_number)
 
+    @property
+    def problem(self) -> str:
+        """Why this account cannot produce a scannable QR ('' when it can).
+
+        A typo here only shows up as a failed scan at the barrier, so it is
+        worth catching in the settings screen instead.
+        """
+        bin_code = self.bank_bin.strip()
+        account = self.account_number.strip()
+        if not bin_code or not account:
+            return "Chưa khai báo mã ngân hàng (bank_bin) hoặc số tài khoản."
+        if not bin_code.isdigit() or len(bin_code) != 6:
+            return f"Mã ngân hàng phải là 6 chữ số (đang là '{bin_code}')."
+        if not account.isalnum():
+            return "Số tài khoản chỉ gồm chữ và số, không có dấu cách hay dấu chấm."
+        if len(account) > 19:
+            return "Số tài khoản dài quá 19 ký tự."
+        return ""
+
+
+def transfer_note(visit_id: int | None, plate: str) -> str:
+    """Transfer content the payer sends, short enough for tag 62 and unique
+    enough to match a bank statement line back to one visit."""
+    prefix = f"GX{visit_id} " if visit_id else "GX "
+    return (prefix + plate.replace(" ", ""))[:25]
+
 
 def build_vietqr(
     account: BankAccount,
