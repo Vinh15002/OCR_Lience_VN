@@ -1,7 +1,6 @@
 # Hướng dẫn lắp đặt & cấu hình OCR Plate
 
-Tài liệu dành cho người vận hành bãi xe — làm theo đúng thứ tự từ trên xuống là chạy được.
-Không cần biết lập trình.
+Tài liệu dành cho kỹ thuật lắp đặt và người cấu hình bãi xe — làm theo đúng thứ tự từ trên xuống là chạy được. Quy trình sử dụng hằng ngày nằm tại [Hướng dẫn vận hành](HUONG-DAN-VAN-HANH.md); mục lục đầy đủ nằm tại [docs/README.md](README.md).
 
 ---
 
@@ -48,7 +47,7 @@ Một làn xe máy chạy tốt trên máy i5 + 8 GB RAM. Từ **3 camera trở 
 
 1. Chép cả thư mục `OCR_Plate` (bản `dist`) vào ổ đĩa, ví dụ `D:\OCR_Plate`.
 2. Chạy `OCR_Plate.exe`.
-3. Lần chạy đầu tiên mất **1–3 phút** để nạp model nhận dạng — đây là bình thường.
+3. Lần chạy đầu có thể mất từ vài chục giây đến vài phút để chép/nạp model nhận dạng — đây là bình thường.
 
 > Không đặt phần mềm trong `C:\Program Files` (Windows chặn ghi dữ liệu vào đó).
 > Chi tiết cách tạo bản đóng gói: xem [packaging/README.md](../packaging/README.md).
@@ -60,14 +59,15 @@ Một làn xe máy chạy tốt trên máy i5 + 8 GB RAM. Từ **3 camera trở 
 # 2. Trong thư mục dự án:
 python -m venv .venv
 .\.venv\Scripts\activate
-pip install -r requirements.txt
-pip install qrcode pyserial      # tuỳ chọn: mã QR thu tiền + barrier cổng COM
+python -m pip install -r requirements.txt
 python app.py
 ```
 
+`qrcode`, `reportlab` và `pyserial` đã có trong `requirements.txt`, không cần cài lại riêng.
+
 ### 2.1 Kiểm tra sau khi cài
 
-Mở app lên, thấy đủ 5 thẻ: **Giám sát · Bãi xe · Đăng ký xe · Báo cáo · Cài đặt** là cài đúng.
+Mở app lên, thấy đủ 5 thẻ: **Giám sát · Bãi xe · Đăng ký xe · Báo cáo · Cài đặt** là cài đúng. Với bản EXE, nên chạy thêm `OCR_Plate.exe --self-test`; `SELFTEST PASSED` trong `logs/selftest.log` xác nhận detector và OCR nạp được, nhưng chưa thay cho kiểm thử camera/thanh toán/barrier.
 
 ---
 
@@ -142,7 +142,7 @@ Nhập `0` vào ô địa chỉ rồi bấm **Thêm nguồn**. Nếu máy có nh
 | **Ezviz** | `rtsp://admin:matkhau@192.168.1.108:554/h264/ch1/main/av_stream` | `.../ch1/sub/av_stream` |
 | **Đầu ghi (NVR/DVR)** | Giống hãng tương ứng, đổi số kênh: `101`, `201`, `301`… hoặc `channel=2` | — |
 
-> Mật khẩu có ký tự đặc biệt (`@`, `:`, `/`) sẽ làm hỏng địa chỉ. Hãy **đổi sang mật khẩu chỉ gồm chữ và số**.
+> Mật khẩu có ký tự đặc biệt (`@`, `:`, `/`) phải được URL-encode đúng. Ưu tiên tạo một tài khoản camera chỉ có quyền xem thay vì làm yếu mật khẩu quản trị.
 
 ### 4.4 Tìm địa chỉ IP và thử trước bằng VLC
 
@@ -156,13 +156,13 @@ Luôn thử bằng VLC **trước khi** đưa vào phần mềm — để biết
 ### 4.5 Thêm camera trong ứng dụng
 
 1. Vào thẻ **Cài đặt** → khung **Nguồn video / camera**.
-2. Dán địa chỉ vào ô **Camera IP / RTSP / webcam**.
-3. Ở hàng dưới bảng, chọn **Chiều** = `IN` (cổng vào) hoặc `OUT` (cổng ra) — *bắt buộc đúng*, nếu không phần mềm sẽ ghép nhầm lượt vào/ra.
-4. Bấm **Thêm nguồn**.
+2. Ở nhóm tuỳ chọn phía trên danh sách, chọn **Chiều** = `IN` (cổng vào) hoặc `OUT` (cổng ra), nhập **Trễ (s)** và chọn **Lặp video** nếu nguồn là file cần chạy lại.
+3. Dán địa chỉ vào ô **Camera IP / RTSP / webcam**.
+4. Bấm **Thêm nguồn**. Nút này lấy Chiều/Trễ/Lặp từ nhóm phía trên, không lấy nhóm chỉnh sửa phía dưới bảng.
 5. Lặp lại cho camera thứ hai.
 6. Bấm **▶ Bắt đầu** ở thanh trên cùng, sang thẻ **Giám sát** để xem hình.
 
-Muốn đổi vai trò camera đã thêm: chọn dòng trong bảng → chọn **Chiều** → bấm **Áp dụng cho nguồn đã chọn**.
+Muốn đổi nguồn đã thêm: chọn dòng trong bảng → chỉnh **Chiều / Trễ / Lặp video** ở nhóm dưới bảng → bấm **Áp dụng cho nguồn đã chọn**. File không bật lặp sẽ chuyển sang `finished` khi chạy hết; file bật lặp sẽ mở lại từ đầu.
 
 **Trạng thái hiển thị trên khung camera:**
 
@@ -171,6 +171,7 @@ Muốn đổi vai trò camera đã thêm: chọn dòng trong bảng → chọn *
 | `connected` | Đang chạy bình thường |
 | `reconnecting` | Mất tín hiệu, đang tự kết nối lại |
 | `cannot open` | Sai địa chỉ / sai mật khẩu / camera chưa bật |
+| `finished` | File đã chạy hết và không bật lặp |
 | `⚠ MẤT KẾT NỐI` | Quá `camera_alert_seconds` giây không có hình |
 
 ---
@@ -231,56 +232,57 @@ Vào **Cài đặt** → khung **Thu tiền QR (VietQR)**:
 
 | Ô nhập | Nhập gì |
 | --- | --- |
-| Mã NH (BIN) | 6 chữ số theo bảng dưới |
+| Mã NH (BIN) | Chọn ngân hàng trong danh sách dropdown |
 | Số tài khoản | Chỉ chữ và số, không dấu cách |
 | Tên chủ TK | Viết hoa không dấu, ví dụ `NGUYEN VAN A` |
 
-Mã BIN các ngân hàng phổ biến:
-
-| Ngân hàng | BIN | Ngân hàng | BIN |
-| --- | :-: | --- | :-: |
-| Vietcombank | 970436 | ACB | 970416 |
-| VietinBank | 970415 | VPBank | 970432 |
-| BIDV | 970418 | TPBank | 970423 |
-| Agribank | 970405 | Sacombank | 970403 |
-| Techcombank | 970407 | MSB | 970426 |
-| MB Bank | 970422 | VIB | 970441 |
-| HDBank | 970437 | SHB | 970443 |
-| OCB | 970448 | — | — |
+Dropdown hiện có 20 ngân hàng: VietinBank, Vietcombank, BIDV, Agribank, MBBank, Techcombank, ACB, VPBank, TPBank, Sacombank, HDBank, VIB, SHB, Eximbank, MSB, OCB, LPBank, PVcomBank, ABBANK và SeABank.
 
 Bấm **Lưu & kiểm tra**. Phần mềm báo ngay:
 
-- `✓ Tài khoản hợp lệ` → nút **📱 Thu QR** ở thẻ Bãi xe đã dùng được.
+- `✓ Tài khoản hợp lệ` → dữ liệu đủ đúng định dạng để tạo QR.
 - `⚠ …` → sửa theo đúng nội dung báo lỗi.
+
+Kiểm tra tại chỗ không gọi ngân hàng để xác minh số tài khoản hoặc tên chủ tài khoản. Bắt buộc quét thử bằng app ngân hàng trước nghiệm thu.
 
 Nội dung chuyển khoản được phần mềm tự điền sẵn dạng `GX<số lượt> <biển số>` — đây là chìa khoá để đối soát tự động ở mục sau.
 
 ### 6.3b Tự động báo "đã nhận tiền" (khuyến nghị)
 
-Không có mục này thì nhân viên phải tự nhìn tin nhắn ngân hàng rồi bấm *Xác nhận đã thu* — chậm và dễ nhầm.
-Bật đối soát tự động thì phần mềm tự tick khi tiền về, **cửa sổ QR tự đóng** và lượt chuyển sang `✓ Đã thu`.
+Bật đối soát tự động thì phần mềm tự tick khi tiền về, **cửa sổ QR tự đóng** và lượt chuyển sang `✓ Đã thu`. Không có feed, QR vẫn tạo được nhưng ứng dụng không biết tiền đã về. Nút trong dialog là **Đã thu tiền mặt**, không phải xác nhận chuyển khoản.
 
-**Cách hoạt động:** phần mềm hỏi dịch vụ đối soát mỗi 20 giây xem có giao dịch đến mới không, rồi ghép giao dịch với lượt xe theo nội dung `GX<số lượt>`. Nếu nội dung bị mất, phần mềm ghép theo số tiền — nhưng **chỉ khi có đúng một lượt chưa thanh toán đúng số tiền đó**, không bao giờ đoán bừa.
+**Cách hoạt động:** phần mềm poll dịch vụ đối soát, rồi ghép giao dịch với lượt xe theo nội dung `GX<số lượt>`. Giao dịch phải phát sinh sau lúc dialog QR của lượt được mở. Nếu nội dung bị mất, phần mềm chỉ ghép khi số tiền bằng chính xác và có đúng một lượt đang nợ mức đó.
 
 **Các bước:**
 
 | Bước | Việc làm |
 | :-: | --- |
 | 1 | Đăng ký tài khoản tại **[my.sepay.vn](https://my.sepay.vn)** (hoặc **[casso.vn](https://casso.vn)**) và liên kết tài khoản ngân hàng của bãi xe |
-| 2 | Vào *Cấu hình công ty → API Access* → **Thêm API** → sao chép **API Token** |
+| 2 | Tạo **API Token/API Key có quyền đọc giao dịch** theo tài liệu của provider; không dùng tên đăng nhập/mật khẩu |
 | 3 | Trong app: **Cài đặt** → **Thu tiền QR** → khung *Tự động xác nhận đã nhận tiền* |
 | 4 | Chọn **Dịch vụ** = `sepay` (hoặc `casso`), dán **API token**, đặt **Chu kỳ** = `20` giây |
 | 5 | Bấm **Áp dụng** → dòng trạng thái phải hiện `✓ Đang theo dõi · … lượt chờ thu` |
-| 6 | Thử chuyển 2.000đ vào chính tài khoản đó với nội dung `GX1` → trong ~20 giây lượt số 1 phải tự chuyển sang `✓ Đã thu` |
+| 6 | Tạo một lượt thử, mở QR, chuyển đúng số tiền và giữ nguyên nội dung `GX...` hiện trên QR → chờ lượt tự chuyển sang `✓ Đã thu` |
 
 **Những điều nên biết:**
 
-- Token chỉ có quyền **đọc** danh sách giao dịch đến — không rút được tiền.
+- Trường token chỉ nhận API Token/API Key. Không nhập username, password SePay hay thông tin Internet Banking.
 - Máy tính phải có Internet. Mất mạng thì dòng trạng thái hiện `⚠`, phần mềm vẫn chạy bình thường và nhân viên thu tay như cũ.
 - Khách chuyển **thiếu tiền** thì phần mềm **không** tự xác nhận (tránh thất thoát); chuyển thừa thì vẫn tính là đã thu.
 - Mỗi giao dịch chỉ khớp được một lượt, không thể tick hai lần cho cùng một lượt.
 - Lượt thu tự động ghi nhân viên là `(tự động)`, phương thức `BANK`, kèm mã giao dịch ngân hàng để đối chiếu sau này.
-- Ví điện tử (MoMo, ZaloPay, VNPay): các ví này đọc được mã VietQR nên khách vẫn quét trả tiền bình thường; phần đối soát tự động vẫn chạy qua tài khoản ngân hàng nhận tiền.
+- Chỉ quét QR mà chưa chuyển tiền không làm đổi trạng thái.
+
+Client SePay hiện dùng endpoint API v1 legacy. Xem toàn bộ điều kiện matching, lưu ý phiên bản API và xử lý lỗi tại [Thanh toán & đối soát](THANH-TOAN-VA-DOI-SOAT.md).
+
+### 6.3c MoMo merchant
+
+MoMo là lựa chọn riêng trong thẻ **Bãi xe**, không dùng `payment_api_token`. Vào **Cài đặt → Ví điện tử MoMo**, chọn `sandbox`/`production`, nhập **Partner Code**, **Access Key**, **Secret Key** của tài khoản MoMo for Business rồi bấm **Lưu MoMo**.
+
+- Không dùng thông tin ví MoMo cá nhân.
+- Dòng sẵn sàng chỉ kiểm tra đã nhập đủ ba trường; phải chạy một giao dịch sandbox để xác thực thật.
+- Ứng dụng tạo giao dịch merchant và query trạng thái; chỉ thành công, đủ tiền mới đánh dấu `MOMO/PAID`.
+- Credential được lưu rõ trong `config.json`; không gửi hoặc đưa file này vào bản phát hành công khai.
 
 ### 6.4 Vé tháng
 
@@ -291,6 +293,8 @@ Giá mặc định theo loại xe sửa trong `config.json` ở mục `monthly_t
 
 Đầu ca, nhân viên bấm **🕒 Mở ca** và nhập tiền quỹ lẻ. Cuối ca bấm **🕒 Đóng ca**, nhập số tiền đếm được — phần mềm báo khớp hay lệch bao nhiêu.
 
+> Giới hạn hiện tại: giao dịch tự động `BANK` và `MOMO` đang bị bộ tính ca gộp vào tiền mặt phải có. Khi bật hai phương thức này, phải đối chiếu thêm provider/sao kê cho tới khi logic được sửa.
+
 ### 6.6 Tài khoản đăng nhập
 
 Mặc định **không** bắt đăng nhập. Khi triển khai thật:
@@ -299,21 +303,30 @@ Mặc định **không** bắt đăng nhập. Khi triển khai thật:
 2. Mở lại app, đăng nhập `admin` / `admin`.
 3. Vào **Cài đặt** → **👤 Tài khoản** → **đổi ngay mật khẩu admin** và tạo tài khoản `operator` cho nhân viên.
 
+Operator vẫn có thể vận hành camera, sửa cấu hình, thu tiền và điều khiển barrier; chỉ bị chặn quản lý tài khoản, backup, purge và xóa dữ liệu nhận dạng. Ứng dụng hiện chưa có nút logout/chuyển người dùng.
+
 ---
 
 ## 7. Nghiệm thu trước khi chạy thật
 
-Chạy đủ 10 mục này rồi mới bàn giao cho nhân viên:
+Chạy đủ các mục này rồi mới bàn giao cho nhân viên:
 
 - [ ] Cả hai camera hiện `connected`, hình rõ, không ngược sáng.
 - [ ] Chạy thử **10 xe** ban ngày: đọc đúng ít nhất 9 biển.
 - [ ] Chạy thử **10 xe** ban đêm: đọc đúng ít nhất 8 biển.
 - [ ] Xe vào rồi ra → lượt chuyển sang `COMPLETED`, phí tính đúng.
+- [ ] Xe OUT có phí → dialog QR tự mở; chỉ quét, chưa chuyển tiền → vẫn **Chưa thanh toán**.
 - [ ] Bấm đúp một lượt → thấy đủ **ảnh xe vào và ảnh xe ra**.
 - [ ] Thử xe trong danh sách đen → cổng **không** mở.
 - [ ] Thử ghi tay một lượt (giả lập mất vé) → lượt hiện cờ *Ghi tay*.
 - [ ] Quét thử mã QR bằng app ngân hàng → đúng số tiền, đúng tên chủ tài khoản.
-- [ ] Mở ca → thu 2 lượt → đóng ca → số tiền khớp.
+- [ ] Nếu bật SePay/Casso: chuyển đúng tiền và nội dung `GX...` → lượt tự thành **Đã thu**.
+- [ ] Nếu bật MoMo: giao dịch sandbox thành công → lượt tự thành **Đã thu**.
+- [ ] Nút **Đã thu tiền mặt** ghi `CASH`; không dùng nút này cho chuyển khoản.
+- [ ] Video file bật/tắt **Lặp video** có hành vi đúng.
+- [ ] Hai nút mở/đóng barrier thủ công phản hồi và có audit; cổng thật có cảm biến an toàn.
+- [ ] Xuất báo cáo CSV và PDF → PDF có biểu đồ, nút **Mở file** hoạt động.
+- [ ] Mở ca → thu thử → đóng ca; nếu có BANK/MOMO, đối chiếu thêm sao kê do giới hạn đã nêu.
 - [ ] Bấm **💾 Sao lưu CSDL** → có file trong `data/backups/`.
 
 ---
@@ -328,14 +341,14 @@ Chạy đủ 10 mục này rồi mới bàn giao cho nhân viên:
 | Đọc sai ký tự (`S` ↔ `5`, `O` ↔ `0`) | Ảnh nhỏ hoặc mờ | Tăng **Kích thước ảnh** lên 1280, chuyển **Mô hình OCR** sang `medium` |
 | Ban đêm không đọc được | Thiếu sáng, màn trập chậm | Gắn đèn LED trắng, chỉnh màn trập ≥ 1/500 s |
 | Một xe ghi thành 2 lượt | Cooldown quá ngắn | Tăng `duplicate_cooldown_seconds` lên 20 |
-| Lượt hiện `REVIEW` | Có xe ra mà không có xe vào | Dùng **Ghi thủ công** để bổ sung lượt vào, hoặc **✏ Sửa biển** nếu đọc sai |
+| Lượt hiện `REVIEW` | Có xe ra mà không có xe vào | Đối soát ảnh và xử lý theo quy trình; IN ghi sau không tự ghép lại lượt REVIEW cũ |
 | Máy chạy giật, chậm | Quá nhiều camera hoặc ảnh quá lớn | Giảm `preview_fps` xuống 15, **Kích thước ảnh** xuống 640 |
 | Nút QR không hiện mã | Chưa cài gói `qrcode` | Chạy `pip install qrcode` (bản đóng gói đã có sẵn) |
 | Đối soát tự động báo `⚠ HTTP 401` | Sai API token hoặc token đã bị xoá | Tạo lại token ở my.sepay.vn rồi dán lại, bấm **Áp dụng** |
-| Tiền đã về mà không tự tick | Khách xoá nội dung `GX…`, hoặc có 2 lượt cùng số tiền | Thu tay bằng nút **💵 Thu tiền mặt**; nhắc khách giữ nguyên nội dung chuyển khoản |
+| Tiền đã về mà không tự tick | QR chưa được mở trước giao dịch, sai GX, thiếu tiền, timestamp/token/tài khoản sai hoặc số tiền mơ hồ | Kiểm tra trạng thái feed và [Thanh toán & đối soát](THANH-TOAN-VA-DOI-SOAT.md); không ghi giả phương thức tiền mặt |
 | Không mở được cổng cho khách quen | Đang ở chế độ `registered_only` | Đổi sang `all`, hoặc thêm xe vào danh sách đăng ký |
 
-Khi cần báo lỗi cho kỹ thuật, gửi kèm file `logs/app.log`.
+Xem quy trình chi tiết tại [Xử lý sự cố](XU-LY-SU-CO.md). Bản EXE ghi lỗi vào `logs/app.log`; chạy source nên lấy traceback từ console. Luôn che token, Secret Key và mật khẩu RTSP trước khi gửi.
 
 ---
 
@@ -345,7 +358,7 @@ Khi cần báo lỗi cho kỹ thuật, gửi kèm file `logs/app.log`.
 | --- | --- |
 | Lau ống kính camera | Hàng tuần |
 | Kiểm tra ảnh chụp ban đêm còn rõ không | Hàng tuần |
-| Bấm **💾 Sao lưu CSDL**, chép ra USB | Hàng tuần |
+| Bấm **💾 Sao lưu CSDL**; khi app đã dừng, sao lưu thêm `data/snapshots` và `config.json` vào nơi được bảo vệ | Hàng tuần |
 | Rà danh sách vé tháng sắp hết hạn (dòng cảnh báo cam ở thẻ Đăng ký xe) | Hàng tuần |
 | Đối chiếu báo cáo doanh thu với tiền thực thu | Cuối mỗi ca |
 | Đặt **Giữ dữ liệu (ngày)** để tự xoá dữ liệu cũ (ví dụ 180 ngày) | Cài một lần |
@@ -354,5 +367,10 @@ Khi cần báo lỗi cho kỹ thuật, gửi kèm file `logs/app.log`.
 
 ## 10. Tài liệu liên quan
 
-- [README.md](../README.md) — toàn bộ tính năng và tham số nâng cao
-- [packaging/README.md](../packaging/README.md) — tạo bản `.exe` mang đi cài
+- [Mục lục tài liệu](README.md) — chọn tài liệu theo vai trò
+- [Hướng dẫn vận hành](HUONG-DAN-VAN-HANH.md) — quy trình một ca tại chốt
+- [Thanh toán & đối soát](THANH-TOAN-VA-DOI-SOAT.md) — VietQR, SePay/Casso và MoMo
+- [Tham chiếu cấu hình](THAM-CHIEU-CAU-HINH.md) — ý nghĩa toàn bộ `config.json`
+- [Kiến trúc kỹ thuật](KIEN-TRUC-KY-THUAT.md) — module, DB, luồng và giới hạn
+- [Xử lý sự cố](XU-LY-SU-CO.md) — chẩn đoán theo triệu chứng
+- [Hướng dẫn đóng gói](../packaging/README.md) — tạo bản `.exe` mang đi cài

@@ -175,7 +175,10 @@ class RecognitionEngine:
         self.model = YOLO(str(model_path))
         # The detector already returns a tightly cropped plate, so direct text
         # recognition is much faster than running a second text detector.
-        self.ocr = TextRecognition(model_name=config.ocr_recognition_model)
+        # Keep OCR portable: a GPU Paddle wheel may be installed on the build
+        # machine, but target PCs must not need the multi-gigabyte CUDA/cuDNN
+        # runtime. The YOLO detector remains free to select its own device.
+        self.ocr = TextRecognition(model_name=config.ocr_recognition_model, device="cpu")
         # Target text-line height fed to the recognizer. Small/distant plates
         # are upscaled up to this height; plates already larger are left alone.
         self._ocr_target_height = 64

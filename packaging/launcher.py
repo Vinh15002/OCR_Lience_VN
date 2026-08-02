@@ -101,7 +101,7 @@ def self_test(base: Path) -> int:
 
         from paddleocr import TextRecognition
 
-        recognizer = TextRecognition(model_name=config.ocr_recognition_model)
+        recognizer = TextRecognition(model_name=config.ocr_recognition_model, device="cpu")
         recognizer.predict(np.zeros((64, 192, 3), dtype=np.uint8))
         lines.append(f"OCR OK ({config.ocr_recognition_model})")
         lines.append("SELFTEST PASSED")

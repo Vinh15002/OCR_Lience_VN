@@ -4,8 +4,8 @@
 
 .DESCRIPTION
     Runs PyInstaller against packaging/OCR_Plate.spec, then stages the files the
-    app reads at runtime (config, detector weights, sample videos, empty data
-    folder) next to the generated .exe. The result is dist/OCR_Plate/, a folder
+    app reads at runtime (config, detector weights, documentation, sample videos,
+    empty data folder) next to the generated .exe. The result is dist/OCR_Plate/, a folder
     that can be copied to any Windows 10/11 x64 machine and run offline.
 
 .PARAMETER SkipSampleVideos
@@ -60,6 +60,12 @@ Copy-Item $modelSource $appDir -Force
 foreach ($name in @("README.md")) {
     $path = Join-Path $projectRoot $name
     if (Test-Path $path) { Copy-Item $path $appDir -Force }
+}
+
+$docsSource = Join-Path $projectRoot "docs"
+if (Test-Path $docsSource) {
+    Copy-Item $docsSource $appDir -Recurse -Force
+    Write-Host "Staged documentation from $docsSource"
 }
 
 foreach ($name in @("data", "data\snapshots", "data\backups", "logs")) {
