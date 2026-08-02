@@ -76,6 +76,7 @@ class PlateApp(tk.Tk):
         self._bank_stop = threading.Event()
         self._feed_status = ""
         self._paid_visit_ids: set[int] = set()
+        self._open_payment_visits: set[int] = set()
         self._camera_seen: dict[str, float] = {}
         self.streams: dict[str, tuple[CameraConfig, CameraStream]] = {}
         self.processor: MultiCameraProcessor | None = None
@@ -1574,6 +1575,8 @@ class PlateApp(tk.Tk):
                         self._handle_gate(event)
                     if item.new_events:
                         self._refresh_visit_views()
+                        for event in item.new_events:
+                            self._maybe_open_exit_payment(event)
         except Empty:
             pass
         self._update_stats()
@@ -1589,6 +1592,23 @@ class PlateApp(tk.Tk):
             self._gate_denied_plate = event.plate
             self.event_store.write_audit(user, "GATE_DENY", f"{event.plate} {event.access_reason}")
         self._update_stats()
+
+    def _maybe_open_exit_payment(self, event) -> None:
+        """Show collection QR as soon as an OUT event completes a paid visit."""
+        if event.direction != "OUT" or not event.visit_id:
+            return
+        detail = self.event_store.visit_detail(int(event.visit_id))
+        if not detail:
+            return
+        if (
+            detail.get("status") != "COMPLETED"
+            or detail.get("payment_status") != "UNPAID"
+            or float(detail.get("fee") or 0) <= 0
+        ):
+            return
+        self._show_qr_window(
+            int(detail["id"]), float(detail["fee"]), str(detail["plate"])
+        )
 
     def _poll_previews(self) -> None:
         now = time.monotonic()
@@ -2029,6 +2049,7 @@ class PlateApp(tk.Tk):
         self._events_total += 1
         self._insert_event(event, top=True)
         self._refresh_visit_views()
+        self._maybe_open_exit_payment(event)
         self._update_stats()
         self.status_var.set(
             f"Đã ghi tay xe {event.plate} {'vào' if event.direction == 'IN' else 'ra'}"
@@ -2217,7 +2238,8 @@ class PlateApp(tk.Tk):
                 f"visit {visit_id} {int(transaction.amount)} {transaction.reference}",
             )
             self.event_store.record_bank_transaction(provider, transaction.id)
-            self._paid_visit_ids.add(visit_id)
+            if visit_id in self._open_payment_visits:
+                self._paid_visit_ids.add(visit_id)
         if settled:
             self._refresh_visit_views()
             self.status_var.set(f"✅ Tự động xác nhận {settled} lượt đã chuyển khoản")
@@ -2897,6 +2919,9 @@ class PlateApp(tk.Tk):
         threading.Thread(target=create_worker, name="momo-create", daemon=True).start()
 
     def _show_qr_window(self, visit_id: int, amount: float, plate: str) -> None:
+        if visit_id in self._open_payment_visits:
+            return
+        self._open_payment_visits.add(visit_id)
         bank = self.app_config.bank()
         window = tk.Toplevel(self)
         window.title("Thu tiền QR")
@@ -2905,6 +2930,15 @@ class PlateApp(tk.Tk):
         window.resizable(False, False)
         frame = ttk.Frame(window, padding=16)
         frame.pack()
+
+        def close_window() -> None:
+            self._open_payment_visits.discard(visit_id)
+            try:
+                window.destroy()
+            except tk.TclError:
+                pass
+
+        window.protocol("WM_DELETE_WINDOW", close_window)
         ttk.Label(frame, text=f"Phí gửi xe: {self._money(amount)}đ", style="Heading.TLabel").pack()
         ttk.Label(frame, text=f"Biển số: {plate}", foreground="#5b6b7b").pack(pady=(0, 8))
         problem = bank.problem
@@ -2947,33 +2981,35 @@ class PlateApp(tk.Tk):
 
         def confirm() -> None:
             user = self.current_user.username if self.current_user else None
-            self.event_store.mark_paid(
-                visit_id, "QR", username=user,
+            rows = self.event_store.mark_paid(
+                visit_id, "CASH", username=user,
                 shift_id=self.active_shift["id"] if self.active_shift else None,
             )
-            self.event_store.write_audit(user, "PAYMENT_QR", f"{plate} {int(amount or 0)}")
+            if rows:
+                self.event_store.write_audit(
+                    user, "PAYMENT_CASH", f"{plate} {int(amount or 0)}"
+                )
             self._refresh_visit_views()
-            self.status_var.set(f"Đã thu QR {self._money(amount)}đ")
-            window.destroy()
+            self.status_var.set(
+                f"Đã thu tiền mặt {self._money(amount)}đ" if rows
+                else f"Lượt {plate} đã được thanh toán trước đó"
+            )
+            close_window()
 
         confirm_button = ttk.Button(
-            frame, text="✅ Xác nhận đã thu", command=confirm, style="Accent.TButton"
+            frame, text="💵 Đã thu tiền mặt", command=confirm, style="Accent.TButton"
         )
         confirm_button.pack(fill=tk.X, pady=(12, 0))
-        if problem:
-            # Nothing was shown to scan, so nothing can have been transferred.
-            confirm_button.state(["disabled"])
-            return
 
         watching = self._bank_feed is not None
         hint = ttk.Label(
             frame,
             text="⏳ Đang chờ báo có từ ngân hàng…" if watching
-                 else "Chỉ bấm xác nhận sau khi thấy tiền đã về tài khoản.",
+                 else "Quét QR để chuyển khoản hoặc bấm nút khi khách trả tiền mặt.",
             foreground="#5b6b7b",
         )
         hint.pack(pady=(4, 0))
-        if not watching:
+        if not watching or problem:
             return
 
         def watch() -> None:
@@ -2983,7 +3019,7 @@ class PlateApp(tk.Tk):
             if visit_id in self._paid_visit_ids:
                 self._paid_visit_ids.discard(visit_id)
                 hint.configure(text="✅ Đã nhận đủ tiền", foreground="#2f9e6b")
-                window.after(1200, window.destroy)
+                window.after(1200, close_window)
                 return
             window.after(1000, watch)
 
