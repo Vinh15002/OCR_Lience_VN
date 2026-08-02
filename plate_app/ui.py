@@ -33,8 +33,8 @@ from .parking import (
     VEHICLE_TYPES,
     RegisteredVehicle,
 )
-from .bankfeed import PROVIDERS, FeedError, build_feed, match_all
-from .payment import build_vietqr, transfer_note
+from .bankfeed import PROVIDERS, FeedError, build_feed, match_requested
+from .payment import VIETQR_BANKS, build_vietqr, transfer_note
 from .recognition import (
     Detection,
     MultiCameraProcessor,
@@ -261,6 +261,9 @@ class PlateApp(tk.Tk):
         ).pack(side=tk.LEFT)
         ttk.Button(actions, text="📱 Thu QR", command=lambda: self._collect_payment("QR")).pack(
             side=tk.LEFT, padx=4
+        )
+        ttk.Button(actions, text="🟣 Thu MoMo", command=lambda: self._collect_payment("MOMO")).pack(
+            side=tk.LEFT
         )
         ttk.Button(actions, text="🔍 Đối soát", command=self._show_visit_review).pack(side=tk.LEFT)
         ttk.Button(actions, text="✏ Sửa biển", command=self._correct_visit_plate).pack(
@@ -623,14 +626,60 @@ class PlateApp(tk.Tk):
 
         left = ttk.Frame(parent)
         left.grid(row=0, column=0, sticky="nsew", padx=(0, 6))
-        right = ttk.Frame(parent)
-        right.grid(row=0, column=1, sticky="nsew", padx=(6, 0))
+
+        # The settings column is taller than the window on smaller displays.
+        # Put it in a canvas so every section remains reachable by scrollbar
+        # or mouse wheel without changing the layout of the camera column.
+        right_host = ttk.Frame(parent)
+        right_host.grid(row=0, column=1, sticky="nsew", padx=(6, 0))
+        right_host.columnconfigure(0, weight=1)
+        right_host.rowconfigure(0, weight=1)
+
+        right_canvas = tk.Canvas(
+            right_host,
+            borderwidth=0,
+            highlightthickness=0,
+            background=self._palette["bg"],
+        )
+        right_scrollbar = ttk.Scrollbar(
+            right_host, orient=tk.VERTICAL, command=right_canvas.yview
+        )
+        right_canvas.configure(yscrollcommand=right_scrollbar.set)
+        right_canvas.grid(row=0, column=0, sticky="nsew")
+        right_scrollbar.grid(row=0, column=1, sticky="ns")
+
+        right = ttk.Frame(right_canvas)
+        right_window = right_canvas.create_window((0, 0), window=right, anchor="nw")
+
+        def update_scroll_region(_event=None) -> None:
+            right_canvas.configure(scrollregion=right_canvas.bbox("all"))
+
+        def fit_content_width(event) -> None:
+            right_canvas.itemconfigure(right_window, width=event.width)
+
+        def scroll_settings(event) -> None:
+            if event.delta:
+                right_canvas.yview_scroll(-1 if event.delta > 0 else 1, "units")
+            return "break"
+
+        right.bind("<Configure>", update_scroll_region)
+        right_canvas.bind("<Configure>", fit_content_width)
 
         self._build_sources_settings(left)
         self._build_recognition_settings(right)
         self._build_rules_settings(right)
         self._build_payment_settings(right)
         self._build_system_settings(right)
+
+        # Bind each child directly so wheel scrolling also works above entries,
+        # spinboxes and comboboxes, without installing a global application bind.
+        def bind_mousewheel(widget) -> None:
+            widget.bind("<MouseWheel>", scroll_settings, add="+")
+            for child in widget.winfo_children():
+                bind_mousewheel(child)
+
+        bind_mousewheel(right_canvas)
+        bind_mousewheel(right)
 
     def _build_sources_settings(self, parent: ttk.Frame) -> None:
         panel = ttk.LabelFrame(parent, text="Nguồn video / camera", padding=8)
@@ -665,6 +714,10 @@ class PlateApp(tk.Tk):
         ttk.Spinbox(
             video_row, from_=0, to=300, increment=1, width=5, textvariable=self.sample_delay_var
         ).pack(side=tk.LEFT)
+        self.sample_loop_var = tk.BooleanVar(value=True)
+        ttk.Checkbutton(
+            video_row, text="Lặp video", variable=self.sample_loop_var
+        ).pack(side=tk.LEFT, padx=(8, 0))
 
         buttons = ttk.Frame(panel)
         buttons.pack(fill=tk.X, pady=(0, 8))
@@ -680,16 +733,19 @@ class PlateApp(tk.Tk):
         ttk.Button(uri_row, text="Thêm nguồn", command=self._add_uri).pack(side=tk.LEFT)
 
         self.source_tree = ttk.Treeview(
-            panel, columns=("direction", "delay", "name", "uri"), show="headings", height=9
+            panel, columns=("direction", "delay", "loop", "name", "uri"),
+            show="headings", height=9,
         )
         self.source_tree.heading("direction", text="Chiều")
         self.source_tree.heading("delay", text="Trễ")
+        self.source_tree.heading("loop", text="Lặp")
         self.source_tree.heading("name", text="Tên")
         self.source_tree.heading("uri", text="Nguồn")
         self.source_tree.column("direction", width=55, anchor=tk.CENTER)
         self.source_tree.column("delay", width=50, anchor=tk.CENTER)
+        self.source_tree.column("loop", width=45, anchor=tk.CENTER)
         self.source_tree.column("name", width=120)
-        self.source_tree.column("uri", width=260)
+        self.source_tree.column("uri", width=220)
         self.source_tree.pack(fill=tk.BOTH, expand=True)
         self.source_tree.bind("<<TreeviewSelect>>", self._source_selected)
 
@@ -706,6 +762,10 @@ class PlateApp(tk.Tk):
         ttk.Spinbox(
             actions, from_=0, to=300, increment=1, width=5, textvariable=self.camera_delay_var
         ).pack(side=tk.LEFT)
+        self.camera_loop_var = tk.BooleanVar(value=False)
+        ttk.Checkbutton(actions, text="Lặp video", variable=self.camera_loop_var).pack(
+            side=tk.LEFT, padx=(8, 0)
+        )
         ttk.Button(actions, text="Áp dụng cho nguồn đã chọn", command=self._set_selected_direction).pack(
             side=tk.LEFT, padx=6
         )
@@ -860,8 +920,27 @@ class PlateApp(tk.Tk):
         row1 = ttk.Frame(panel)
         row1.pack(fill=tk.X, pady=3)
         ttk.Label(row1, text="Mã NH (BIN)").pack(side=tk.LEFT)
-        self.bank_bin_var = tk.StringVar(value=self.app_config.bank_bin)
-        ttk.Entry(row1, textvariable=self.bank_bin_var, width=9).pack(side=tk.LEFT, padx=(4, 10))
+        self.bank_lookup = {
+            f"{name} ({bin_code})": bin_code for name, bin_code in VIETQR_BANKS
+        }
+        bank_options = ["Chọn ngân hàng", *self.bank_lookup]
+        selected_bank = next(
+            (
+                label
+                for label, bin_code in self.bank_lookup.items()
+                if bin_code == self.app_config.bank_bin
+            ),
+            "",
+        )
+        if not selected_bank and self.app_config.bank_bin:
+            selected_bank = f"Mã BIN hiện tại ({self.app_config.bank_bin})"
+            self.bank_lookup[selected_bank] = self.app_config.bank_bin
+            bank_options.append(selected_bank)
+        self.bank_choice_var = tk.StringVar(value=selected_bank or "Chọn ngân hàng")
+        ttk.Combobox(
+            row1, textvariable=self.bank_choice_var, values=bank_options,
+            state="readonly", width=25,
+        ).pack(side=tk.LEFT, padx=(4, 10))
         ttk.Label(row1, text="Số tài khoản").pack(side=tk.LEFT)
         self.bank_account_var = tk.StringVar(value=self.app_config.bank_account)
         ttk.Entry(row1, textvariable=self.bank_account_var, width=18).pack(side=tk.LEFT, padx=4)
@@ -918,6 +997,45 @@ class PlateApp(tk.Tk):
             wraplength=350,
         ).pack(anchor=tk.W, pady=(2, 0))
 
+        momo = ttk.LabelFrame(panel, text="Ví điện tử MoMo", padding=6)
+        momo.pack(fill=tk.X, pady=(8, 0))
+        momo_row1 = ttk.Frame(momo)
+        momo_row1.pack(fill=tk.X, pady=2)
+        ttk.Label(momo_row1, text="Môi trường").pack(side=tk.LEFT)
+        self.momo_environment_var = tk.StringVar(value=self.app_config.momo_environment)
+        ttk.Combobox(
+            momo_row1, textvariable=self.momo_environment_var,
+            values=("sandbox", "production"), state="readonly", width=10,
+        ).pack(side=tk.LEFT, padx=(4, 10))
+        ttk.Label(momo_row1, text="Partner Code").pack(side=tk.LEFT)
+        self.momo_partner_var = tk.StringVar(value=self.app_config.momo_partner_code)
+        ttk.Entry(momo_row1, textvariable=self.momo_partner_var, width=18).pack(side=tk.LEFT, padx=4)
+
+        momo_row2 = ttk.Frame(momo)
+        momo_row2.pack(fill=tk.X, pady=2)
+        ttk.Label(momo_row2, text="Access Key").pack(side=tk.LEFT)
+        self.momo_access_var = tk.StringVar(value=self.app_config.momo_access_key)
+        ttk.Entry(momo_row2, textvariable=self.momo_access_var, width=22, show="•").pack(
+            side=tk.LEFT, padx=(4, 10)
+        )
+
+        momo_row3 = ttk.Frame(momo)
+        momo_row3.pack(fill=tk.X, pady=2)
+        ttk.Label(momo_row3, text="Secret Key").pack(side=tk.LEFT)
+        self.momo_secret_var = tk.StringVar(value=self.app_config.momo_secret_key)
+        ttk.Entry(momo_row3, textvariable=self.momo_secret_var, width=28, show="•").pack(
+            side=tk.LEFT, padx=4
+        )
+        ttk.Button(momo_row3, text="Lưu MoMo", command=self._apply_momo_settings).pack(
+            side=tk.LEFT, padx=4
+        )
+        self.momo_status_var = tk.StringVar(value="")
+        ttk.Label(
+            momo, textvariable=self.momo_status_var, wraplength=350,
+            foreground=self._palette["muted"],
+        ).pack(anchor=tk.W, pady=(2, 0))
+        self._check_momo_settings()
+
     def _apply_feed_settings(self) -> None:
         self._stop_bank_feed()
         self.app_config.payment_provider = self.payment_provider_var.get()
@@ -927,6 +1045,21 @@ class PlateApp(tk.Tk):
         self._start_bank_feed()
         self.status_var.set("Đã áp dụng cấu hình đối soát tự động")
 
+    def _check_momo_settings(self) -> None:
+        problem = self.app_config.momo().problem
+        self.momo_status_var.set(
+            f"⚠ {problem}" if problem else f"✓ MoMo {self.app_config.momo_environment} đã sẵn sàng"
+        )
+
+    def _apply_momo_settings(self) -> None:
+        self.app_config.momo_environment = self.momo_environment_var.get()
+        self.app_config.momo_partner_code = self.momo_partner_var.get().strip()
+        self.app_config.momo_access_key = self.momo_access_var.get().strip()
+        self.app_config.momo_secret_key = self.momo_secret_var.get().strip()
+        save_config(self.app_config, self.config_path)
+        self._check_momo_settings()
+        self.status_var.set("Đã lưu cấu hình ví MoMo")
+
     def _check_bank_settings(self) -> None:
         problem = self.app_config.bank().problem
         self.bank_status_var.set(
@@ -934,7 +1067,7 @@ class PlateApp(tk.Tk):
         )
 
     def _apply_bank_settings(self) -> None:
-        self.app_config.bank_bin = self.bank_bin_var.get().strip()
+        self.app_config.bank_bin = self.bank_lookup.get(self.bank_choice_var.get(), "")
         self.app_config.bank_account = self.bank_account_var.get().strip()
         self.app_config.bank_account_name = self.bank_name_var.get().strip().upper()
         self.bank_name_var.set(self.app_config.bank_account_name)
@@ -1149,6 +1282,7 @@ class PlateApp(tk.Tk):
                 path,
                 Path(path).stem,
                 direction=self.sample_direction_var.get(),
+                loop_video=self.sample_loop_var.get(),
                 start_delay_seconds=self.sample_delay_var.get(),
             )
 
@@ -1173,7 +1307,7 @@ class PlateApp(tk.Tk):
             name=path.stem.replace("_", " ").title(),
             uri=path.as_posix(),
             enabled=True,
-            loop_video=True,
+            loop_video=self.sample_loop_var.get(),
             direction=self.sample_direction_var.get(),
             start_delay_seconds=self.sample_delay_var.get(),
         )
@@ -1193,7 +1327,7 @@ class PlateApp(tk.Tk):
             path.as_posix(),
             path.stem.replace("_", " ").title(),
             direction=self.sample_direction_var.get(),
-            loop_video=True,
+            loop_video=self.sample_loop_var.get(),
             start_delay_seconds=self.sample_delay_var.get(),
         )
         self.status_var.set(
@@ -1209,6 +1343,7 @@ class PlateApp(tk.Tk):
             uri,
             f"Camera {len(self.app_config.cameras) + 1}",
             direction=self.sample_direction_var.get(),
+            loop_video=self.sample_loop_var.get(),
             start_delay_seconds=self.sample_delay_var.get(),
         )
         self.source_var.set("")
@@ -1260,6 +1395,7 @@ class PlateApp(tk.Tk):
         if camera is not None:
             self.camera_direction_var.set(camera.direction)
             self.camera_delay_var.set(camera.start_delay_seconds)
+            self.camera_loop_var.set(camera.loop_video)
 
     def _set_selected_direction(self) -> None:
         selected = set(self.source_tree.selection())
@@ -1268,15 +1404,18 @@ class PlateApp(tk.Tk):
             return
         direction = self.camera_direction_var.get().upper()
         start_delay = max(0.0, self.camera_delay_var.get())
+        loop_video = bool(self.camera_loop_var.get())
         for camera in self.app_config.cameras:
             if camera.id in selected:
                 camera.direction = direction
                 camera.start_delay_seconds = start_delay
+                camera.loop_video = loop_video
         self._save_settings()
         self._refresh_source_tree()
         self._rebuild_camera_grid()
         self.status_var.set(
-            f"Updated selected camera to {direction}, delay {start_delay:g}s"
+            f"Đã cập nhật {direction}, trễ {start_delay:g}s, "
+            f"lặp video: {'Có' if loop_video else 'Không'}"
         )
 
     def _apply_ocr_model(self) -> None:
@@ -1301,6 +1440,7 @@ class PlateApp(tk.Tk):
                 values=(
                     camera.direction,
                     f"{camera.start_delay_seconds:g}s",
+                    "Có" if camera.loop_video else "Không",
                     camera.name,
                     camera.uri,
                 ),
@@ -1308,9 +1448,10 @@ class PlateApp(tk.Tk):
 
     @staticmethod
     def _panel_title(camera) -> str:
+        loop = " · LẶP" if camera.loop_video and Path(camera.uri).is_file() else ""
         if camera.start_delay_seconds:
-            return f"[{camera.direction} +{camera.start_delay_seconds:g}s] {camera.name}"
-        return f"[{camera.direction}] {camera.name}"
+            return f"[{camera.direction} +{camera.start_delay_seconds:g}s{loop}] {camera.name}"
+        return f"[{camera.direction}{loop}] {camera.name}"
 
     def _rebuild_camera_grid(self) -> None:
         for child in self.camera_grid.winfo_children():
@@ -1657,6 +1798,14 @@ class PlateApp(tk.Tk):
                 messagebox.showinfo("Thu tiền", problem)
                 return
             self._show_qr_window(visit.id, visit.fee or 0, visit.plate)
+            return
+        if method == "MOMO":
+            visit = visits.get(selected[0])
+            problem = self._payable_problem(visit)
+            if problem:
+                messagebox.showinfo("Thu tiền", problem)
+                return
+            self._show_momo_window(visit.id, visit.fee or 0, visit.plate)
             return
         paid = 0
         skipped = 0
@@ -2042,8 +2191,15 @@ class PlateApp(tk.Tk):
         if error:
             self._set_feed_status(f"⚠ {error} (lúc {stamp})")
             return
+        provider = getattr(self._bank_feed, "name", "bank")
+        transactions = [
+            transaction
+            for transaction in transactions
+            if not self.event_store.bank_transaction_processed(provider, transaction.id)
+        ]
         pending = self.event_store.pending_payments()
-        matches = match_all(transactions, pending, tolerance=0.0)
+        requested_at = self.event_store.bank_payment_requests()
+        matches = match_requested(transactions, pending, requested_at, tolerance=0.0)
         settled = 0
         for visit_id, transaction in matches:
             rows = self.event_store.mark_paid(
@@ -2060,6 +2216,7 @@ class PlateApp(tk.Tk):
                 "(tự động)", "PAYMENT_BANK",
                 f"visit {visit_id} {int(transaction.amount)} {transaction.reference}",
             )
+            self.event_store.record_bank_transaction(provider, transaction.id)
             self._paid_visit_ids.add(visit_id)
         if settled:
             self._refresh_visit_views()
@@ -2636,6 +2793,109 @@ class PlateApp(tk.Tk):
         except Exception:
             return None
 
+    def _show_momo_window(self, visit_id: int, amount: float, plate: str) -> None:
+        client = self.app_config.momo()
+        if client.problem:
+            messagebox.showinfo(
+                "Thu MoMo", f"{client.problem}.\nKhai báo thông tin merchant trong tab Cài đặt."
+            )
+            return
+
+        window = tk.Toplevel(self)
+        window.title("Thu tiền MoMo")
+        window.transient(self)
+        window.grab_set()
+        window.resizable(False, False)
+        frame = ttk.Frame(window, padding=16)
+        frame.pack()
+        ttk.Label(frame, text=f"Phí gửi xe: {self._money(amount)}đ", style="Heading.TLabel").pack()
+        ttk.Label(frame, text=f"Biển số: {plate}", foreground="#5b6b7b").pack(pady=(0, 8))
+        qr_label = ttk.Label(frame, text="Đang tạo giao dịch MoMo…", justify=tk.CENTER)
+        qr_label.pack(padx=20, pady=12)
+        hint = ttk.Label(
+            frame, text="Vui lòng chờ", foreground="#5b6b7b", wraplength=320, justify=tk.CENTER
+        )
+        hint.pack()
+        ttk.Button(frame, text="Đóng", command=window.destroy).pack(fill=tk.X, pady=(12, 0))
+
+        def window_exists() -> bool:
+            try:
+                return bool(window.winfo_exists())
+            except tk.TclError:
+                return False
+
+        def schedule_query(payment) -> None:
+            if not window_exists():
+                return
+
+            def query_worker() -> None:
+                try:
+                    result, error = client.query(payment.order_id), ""
+                except Exception as exc:
+                    result, error = {}, str(exc)
+                self.after(0, handle_query, payment, result, error)
+
+            threading.Thread(target=query_worker, name="momo-query", daemon=True).start()
+
+        def handle_query(payment, result: dict, error: str) -> None:
+            if not window_exists():
+                return
+            if error:
+                hint.configure(text=f"⚠ {error}\nSẽ thử lại…", foreground="#e05260")
+                window.after(10_000, schedule_query, payment)
+                return
+            try:
+                result_code = int(result.get("resultCode", -1))
+            except (TypeError, ValueError):
+                result_code = -1
+            received = float(result.get("amount") or 0)
+            if result_code == 0 and received >= float(amount):
+                user = self.current_user.username if self.current_user else "(tự động)"
+                rows = self.event_store.mark_paid(
+                    visit_id, "MOMO", username=user,
+                    shift_id=self.active_shift["id"] if self.active_shift else None,
+                    reference=str(result.get("transId") or payment.order_id),
+                )
+                if rows:
+                    self.event_store.write_audit(
+                        user, "PAYMENT_MOMO",
+                        f"visit {visit_id} {int(received)} {result.get('transId', '')}",
+                    )
+                    self._refresh_visit_views()
+                hint.configure(text="✅ MoMo đã xác nhận thanh toán", foreground="#2f9e6b")
+                self.status_var.set(f"Đã thu MoMo {self._money(amount)}đ")
+                window.after(1200, window.destroy)
+                return
+            message = str(result.get("message") or "Đang chờ khách thanh toán")
+            hint.configure(text=f"⏳ {message}", foreground="#5b6b7b")
+            window.after(5_000, schedule_query, payment)
+
+        def payment_created(payment, error: str) -> None:
+            if not window_exists():
+                return
+            if error:
+                qr_label.configure(text="Không tạo được mã MoMo")
+                hint.configure(text=f"⚠ {error}", foreground="#e05260")
+                return
+            image = self._qr_image(payment.qr_data)
+            if image is None:
+                qr_label.configure(text=payment.pay_url or payment.qr_data, wraplength=320)
+            else:
+                photo = ImageTk.PhotoImage(image)
+                window._momo_qr_photo = photo
+                qr_label.configure(image=photo, text="")
+            hint.configure(text="⏳ Quét bằng ứng dụng MoMo để thanh toán")
+            window.after(5_000, schedule_query, payment)
+
+        def create_worker() -> None:
+            try:
+                payment, error = client.create_payment(visit_id, amount, plate), ""
+            except Exception as exc:
+                payment, error = None, str(exc)
+            self.after(0, payment_created, payment, error)
+
+        threading.Thread(target=create_worker, name="momo-create", daemon=True).start()
+
     def _show_qr_window(self, visit_id: int, amount: float, plate: str) -> None:
         bank = self.app_config.bank()
         window = tk.Toplevel(self)
@@ -2649,6 +2909,10 @@ class PlateApp(tk.Tk):
         ttk.Label(frame, text=f"Biển số: {plate}", foreground="#5b6b7b").pack(pady=(0, 8))
         problem = bank.problem
         if not problem:
+            # Only transfers arriving after this moment may settle the visit.
+            # Without this guard an archived GX transaction could be replayed
+            # when visit IDs are reused after clearing the local database.
+            self.event_store.record_bank_payment_request(visit_id)
             note = transfer_note(visit_id, plate)
             payload = build_vietqr(bank, amount=amount or None, description=note)
             image = self._qr_image(payload)

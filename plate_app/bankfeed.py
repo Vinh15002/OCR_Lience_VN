@@ -58,8 +58,11 @@ def match_transaction(
     if transaction.amount <= 0 or not pending:
         return None
     hinted = transaction.visit_hint
-    if hinted is not None and hinted in pending:
-        if transaction.amount + tolerance >= pending[hinted]:
+    if hinted is not None:
+        # An explicit GX reference must never fall back to amount matching.
+        # Otherwise an archived GX3 transfer could settle GX1 after visit IDs
+        # are reused or GX3 has already been paid.
+        if hinted in pending and transaction.amount + tolerance >= pending[hinted]:
             return hinted
         return None
     candidates = [
@@ -80,6 +83,50 @@ def match_all(
     matches: list[tuple[int, BankTransaction]] = []
     for transaction in transactions:
         visit_id = match_transaction(transaction, remaining, tolerance)
+        if visit_id is not None:
+            matches.append((visit_id, transaction))
+            remaining.pop(visit_id, None)
+    return matches
+
+
+def _local_datetime(value: str) -> datetime | None:
+    """Parse provider/app timestamps into comparable local naive datetimes."""
+    text = str(value or "").strip()
+    if not text:
+        return None
+    try:
+        parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is not None:
+        parsed = parsed.astimezone().replace(tzinfo=None)
+    return parsed
+
+
+def match_requested(
+    transactions: list[BankTransaction],
+    pending: dict[int, float],
+    requested_at: dict[int, str],
+    tolerance: float = 0.0,
+) -> list[tuple[int, BankTransaction]]:
+    """Match only transactions created after that visit's QR was requested.
+
+    This prevents an old bank transaction carrying a reused ``GX<visit id>``
+    from settling a new visit when the app starts polling for the first time.
+    A missing/unparseable provider timestamp is rejected rather than guessed.
+    """
+    remaining = dict(pending)
+    matches: list[tuple[int, BankTransaction]] = []
+    for transaction in transactions:
+        transaction_at = _local_datetime(transaction.when)
+        if transaction_at is None:
+            continue
+        eligible = {}
+        for visit_id, amount in remaining.items():
+            request_at = _local_datetime(requested_at.get(visit_id, ""))
+            if request_at is not None and transaction_at >= request_at:
+                eligible[visit_id] = amount
+        visit_id = match_transaction(transaction, eligible, tolerance)
         if visit_id is not None:
             matches.append((visit_id, transaction))
             remaining.pop(visit_id, None)

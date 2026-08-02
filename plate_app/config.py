@@ -75,6 +75,11 @@ class AppConfig:
     payment_provider: str = "none"
     payment_api_token: str = ""
     payment_poll_seconds: float = 20.0
+    # MoMo merchant payment API (sandbox by default).
+    momo_partner_code: str = ""
+    momo_access_key: str = ""
+    momo_secret_key: str = ""
+    momo_environment: str = "sandbox"  # "sandbox" | "production"
     # Operations.
     require_login: bool = False
     auto_start: bool = False
@@ -127,6 +132,16 @@ class AppConfig:
             bank_bin=self.bank_bin,
             account_number=self.bank_account,
             account_name=self.bank_account_name,
+        )
+
+    def momo(self):
+        from .momo import MomoClient
+
+        return MomoClient(
+            partner_code=self.momo_partner_code,
+            access_key=self.momo_access_key,
+            secret_key=self.momo_secret_key,
+            environment=self.momo_environment,
         )
 
 

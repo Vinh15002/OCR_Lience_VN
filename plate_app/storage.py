@@ -997,6 +997,44 @@ class EventStore:
                 (key, str(value)),
             )
 
+    def record_bank_payment_request(self, visit_id: int) -> str:
+        """Remember when a bank QR was shown, protecting against old transfers."""
+        requested_at = datetime.now().astimezone().isoformat(timespec="seconds")
+        self.set_state(f"bank_payment_request:{int(visit_id)}", requested_at)
+        return requested_at
+
+    def bank_payment_requests(self) -> dict[int, str]:
+        with self._connect() as connection:
+            rows = connection.execute(
+                "SELECT key, value FROM app_state WHERE key LIKE 'bank_payment_request:%'"
+            ).fetchall()
+        requests = {}
+        for row in rows:
+            try:
+                visit_id = int(str(row["key"]).rsplit(":", 1)[1])
+            except (IndexError, ValueError):
+                continue
+            requests[visit_id] = str(row["value"])
+        return requests
+
+    @staticmethod
+    def _bank_transaction_key(provider: str, transaction_id: str) -> str:
+        clean_provider = "".join(ch for ch in str(provider).lower() if ch.isalnum()) or "bank"
+        clean_id = "".join(ch for ch in str(transaction_id) if ch.isalnum() or ch in "-_")
+        return f"bank_transaction:{clean_provider}:{clean_id}"
+
+    def bank_transaction_processed(self, provider: str, transaction_id: str) -> bool:
+        if not str(transaction_id).strip():
+            return False
+        return bool(self.get_state(self._bank_transaction_key(provider, transaction_id)))
+
+    def record_bank_transaction(self, provider: str, transaction_id: str) -> None:
+        if str(transaction_id).strip():
+            self.set_state(
+                self._bank_transaction_key(provider, transaction_id),
+                datetime.now().astimezone().isoformat(timespec="seconds"),
+            )
+
     def revenue_summary(self, since: str | None = None) -> dict[str, float]:
         query = (
             "SELECT payment_status, COALESCE(fee, 0) AS fee "

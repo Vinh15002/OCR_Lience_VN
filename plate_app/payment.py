@@ -9,6 +9,32 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 
+# Popular Vietnamese beneficiary banks supported by VietQR. Keeping this
+# small catalogue locally means the settings screen also works offline.
+VIETQR_BANKS: tuple[tuple[str, str], ...] = (
+    ("VietinBank", "970415"),
+    ("Vietcombank", "970436"),
+    ("BIDV", "970418"),
+    ("Agribank", "970405"),
+    ("MBBank", "970422"),
+    ("Techcombank", "970407"),
+    ("ACB", "970416"),
+    ("VPBank", "970432"),
+    ("TPBank", "970423"),
+    ("Sacombank", "970403"),
+    ("HDBank", "970437"),
+    ("VIB", "970441"),
+    ("SHB", "970443"),
+    ("Eximbank", "970431"),
+    ("MSB", "970426"),
+    ("OCB", "970448"),
+    ("LPBank", "970449"),
+    ("PVcomBank", "970412"),
+    ("ABBANK", "970425"),
+    ("SeABank", "970440"),
+)
+
+
 def _tlv(tag: str, value: str) -> str:
     return f"{tag}{len(value):02d}{value}"
 

@@ -366,6 +366,15 @@ class RetentionTests(unittest.TestCase):
 
 
 class PaymentTests(unittest.TestCase):
+    def test_common_vietqr_bank_list_has_unique_six_digit_bins(self):
+        from plate_app.payment import VIETQR_BANKS
+
+        self.assertEqual(len(VIETQR_BANKS), 20)
+        bins = [bin_code for _name, bin_code in VIETQR_BANKS]
+        self.assertEqual(len(set(bins)), len(bins))
+        self.assertTrue(all(len(value) == 6 and value.isdigit() for value in bins))
+        self.assertIn(("Vietcombank", "970436"), VIETQR_BANKS)
+
     def test_crc_matches_a_published_vietqr_sample(self):
         from plate_app.payment import crc16_ccitt
 
@@ -428,6 +437,12 @@ class BankFeedTests(unittest.TestCase):
         pending = {11: 5000.0, 12: 5000.0}
         self.assertEqual(match_transaction(self._tx(content="GX12 59X"), pending), 12)
 
+    def test_note_for_another_visit_never_falls_back_to_amount(self):
+        from plate_app.bankfeed import match_transaction
+
+        transaction = self._tx(content="GX99", amount=5000)
+        self.assertIsNone(match_transaction(transaction, {11: 5000}))
+
     def test_match_by_amount_only_when_unambiguous(self):
         from plate_app.bankfeed import match_transaction
 
@@ -454,6 +469,33 @@ class BankFeedTests(unittest.TestCase):
         transactions = [self._tx(id="1", content="GX11"), self._tx(id="2", content="GX11")]
         matches = match_all(transactions, {11: 5000.0})
         self.assertEqual([visit for visit, _ in matches], [11])
+
+    def test_requested_match_rejects_transfer_older_than_qr(self):
+        from plate_app.bankfeed import match_requested
+
+        old = self._tx(content="GX3", amount=3000, when="2026-08-02 15:26:01")
+        matches = match_requested(
+            [old], {3: 3000}, {3: "2026-08-02T15:30:00+07:00"}
+        )
+        self.assertEqual(matches, [])
+
+    def test_requested_match_accepts_transfer_after_qr(self):
+        from plate_app.bankfeed import match_requested
+
+        new = self._tx(content="GX3", amount=3000, when="2026-08-02 15:31:01")
+        matches = match_requested(
+            [new], {3: 3000}, {3: "2026-08-02T15:30:00+07:00"}
+        )
+        self.assertEqual(matches, [(3, new)])
+
+    def test_requested_match_rejects_missing_transaction_time(self):
+        from plate_app.bankfeed import match_requested
+
+        transaction = self._tx(content="GX3", amount=3000, when="")
+        self.assertEqual(
+            match_requested([transaction], {3: 3000}, {3: "2026-08-02T15:30:00+07:00"}),
+            [],
+        )
 
     def test_sepay_response_is_normalised(self):
         from plate_app.bankfeed import SePayFeed
@@ -532,6 +574,64 @@ class BankFeedTests(unittest.TestCase):
             store.set_state("bank_feed_since_id", "907")
             store.set_state("bank_feed_since_id", "908")
             self.assertEqual(store.get_state("bank_feed_since_id"), "908")
+
+    def test_bank_transaction_can_only_be_consumed_once_per_provider(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = EventStore(Path(directory))
+            self.assertFalse(store.bank_transaction_processed("sepay", "71208725"))
+            store.record_bank_transaction("sepay", "71208725")
+            self.assertTrue(store.bank_transaction_processed("sepay", "71208725"))
+            self.assertFalse(store.bank_transaction_processed("casso", "71208725"))
+
+
+class MomoTests(unittest.TestCase):
+    def test_credentials_are_required(self):
+        from plate_app.momo import MomoClient
+
+        self.assertIn("Partner Code", MomoClient().problem)
+        self.assertEqual(MomoClient("partner", "access", "secret").problem, "")
+
+    def test_environment_selects_the_official_endpoint(self):
+        from plate_app.momo import MomoClient
+
+        self.assertEqual(MomoClient(environment="sandbox").base_url, "https://test-payment.momo.vn")
+        self.assertEqual(MomoClient(environment="production").base_url, "https://payment.momo.vn")
+
+    def test_create_payment_builds_a_signed_request(self):
+        from unittest.mock import patch
+
+        from plate_app.momo import MomoClient
+
+        client = MomoClient("partner", "access", "secret")
+        response = {
+            "resultCode": 0,
+            "qrCodeUrl": "momo://pay/test",
+            "payUrl": "https://test-payment.momo.vn/pay/test",
+        }
+        with patch("plate_app.momo.time.time", return_value=1234.5), patch.object(
+            MomoClient, "_post", return_value=response
+        ) as post:
+            payment = client.create_payment(7, 3000, "59X312345")
+        self.assertEqual(payment.order_id, "GX7_1234500")
+        self.assertEqual(payment.qr_data, "momo://pay/test")
+        path, payload = post.call_args.args
+        self.assertEqual(path, "/v2/gateway/api/create")
+        self.assertEqual(payload["amount"], 3000)
+        self.assertEqual(len(payload["signature"]), 64)
+
+    def test_query_uses_visit_order_id(self):
+        from unittest.mock import patch
+
+        from plate_app.momo import MomoClient
+
+        client = MomoClient("partner", "access", "secret")
+        with patch.object(MomoClient, "_post", return_value={"resultCode": 0}) as post:
+            result = client.query("GX7_1234500")
+        self.assertEqual(result["resultCode"], 0)
+        path, payload = post.call_args.args
+        self.assertEqual(path, "/v2/gateway/api/query")
+        self.assertEqual(payload["orderId"], "GX7_1234500")
+        self.assertEqual(len(payload["signature"]), 64)
 
 
 class ReportingTests(unittest.TestCase):

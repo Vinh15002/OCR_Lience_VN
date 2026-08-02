@@ -155,6 +155,7 @@ class ConfigAndStorageTests(unittest.TestCase):
                         "cam-1",
                         "Gate",
                         "0",
+                        loop_video=True,
                         direction="OUT",
                         start_delay_seconds=15,
                     )
@@ -169,6 +170,7 @@ class ConfigAndStorageTests(unittest.TestCase):
             self.assertEqual(loaded.ocr_recognition_model, "PP-OCRv6_medium_rec")
             self.assertEqual(loaded.cameras[0].direction, "OUT")
             self.assertEqual(loaded.cameras[0].start_delay_seconds, 15)
+            self.assertTrue(loaded.cameras[0].loop_video)
 
     def test_empty_event_store(self):
         with tempfile.TemporaryDirectory() as directory:
